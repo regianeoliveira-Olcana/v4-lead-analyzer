@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      23.3
-// @description  v23.3 · farol conferido contra os boxes na tela — nao da mais pra divergir
+// @version      23.5
+// @description  v23.5 · busca crua nao usa cidade de palpite nem nome generico (achou CNPJ de outra empresa)
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '23.3';
+  const VERSION = '23.5';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -2529,7 +2529,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         if (c.length !== 14) continue;
         const casaPrefixo = alvo ? c.startsWith(alvo) : false;
         const citaNome = nucleo && normalizarTexto(texto).includes(nucleo);
-        achados.push({ cnpj: c, casaPrefixo, citaNome, fonte: it.url, titulo: it.titulo });
+        achados.push({ cnpj: c, casaPrefixo, citaNome, fonte: it.url, titulo: it.titulo,
+                       // v23.5: citar um nome genérico não prova nada
+                       nomeGenerico: /^(instituto|associa|funda|centro|col[ée]gio|escola|cl[íi]nica|academia|igreja|sociedade|cooperativa|grupo|casa)/i.test(nucleo) });
       }
     }
     if (!achados.length) return null;
@@ -2547,14 +2549,28 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (!GM_getValue('v4_serper_key', '')) return null;
 
     const nucleo = nucleoDoNome(ex.nomeEmpresa) || ex.nomeEmpresa || '';
-    const cidade = ex.cidade || (ex.regiao ? ex.regiao.praca : '') || '';
     const px = String(ex.cnpjParcial || '').replace(/\D/g, '');
 
-    // da consulta mais específica para a mais ampla
+    // v23.5: SÓ a cidade declarada no cadastro. A praça deduzida do DDD é
+    // palpite, e palpite errado estraga a busca — caso INSTITUTO
+    // PRESBITERIANO: DDD 87 sugeriu "Petrolina / Caruaru", a empresa é de
+    // Lajedo, e a busca trouxe o CNPJ de outro instituto presbiteriano.
+    // A barra ainda ia pra consulta como se fosse parte do nome.
+    const cidade = (ex.cidade && !/não informado|nao informado/i.test(ex.cidade))
+      ? String(ex.cidade).split('/')[0].trim() : '';
+
+    // v23.5: nome genérico não identifica empresa. "instituto presbiteriano"
+    // existe às dezenas; buscar por ele traz qualquer um.
+    const GENERICO_DEMAIS = /^(instituto|associa[çc][ãa]o|funda[çc][ãa]o|centro|col[ée]gio|escola|cl[íi]nica|academia|igreja|paroquia|sociedade|cooperativa|sindicato|grupo|casa|espa[çc]o|studio|est[úu]dio)(\s|$)/i;
+    const nucleoServe = nucleo && nucleo.length > 3 && !GENERICO_DEMAIS.test(nucleo);
+
     const queries = [];
+    // com prefixo do CNPJ é sempre seguro — ele é a prova de identidade
     if (px.length >= 4 && nucleo) queries.push(`"${nucleo}" ${px} CNPJ`);
-    if (nucleo) queries.push(`${nucleo} ${cidade} CNPJ razão social`);
-    if (px.length >= 4) queries.push(`${px} CNPJ ${cidade}`);
+    // sem prefixo, só busca por nome se o nome identificar de verdade
+    if (nucleoServe) queries.push(`${nucleo} ${cidade} CNPJ razão social`.replace(/\s+/g, ' ').trim());
+    if (px.length >= 4) queries.push(`${px} CNPJ ${cidade}`.replace(/\s+/g, ' ').trim());
+    if (!queries.length) return null;
 
     for (const q of queries) {
       const r = await buscarWeb(q);
@@ -7242,6 +7258,17 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
           if (r && r.cnpj) {
             entry.cnpjPorBusca = r;
             console.log('[V4] CNPJ achado pela busca crua em', r.ms + 'ms:', fmtCnpj(r.cnpj), '·', r.query);
+
+            // v23.5: só avisa a IA que está resolvido quando há PROVA. Sem ela,
+            // o aviso manda parar de procurar com o número errado na mão —
+            // pior que não avisar. Caso INSTITUTO PRESBITERIANO: a busca trouxe
+            // 07.293.861 e a empresa era 28.153.459.
+            const provado = r.casaPrefixo || (r.citaNome && !r.nomeGenerico);
+            if (provado && entry.extracted) {
+              entry.extracted._cnpjResolvido = fmtCnpj(r.cnpj);
+            } else {
+              console.log('[V4] sem prova de que é a empresa certa — a IA vai procurar');
+            }
           }
           return r;
         })
@@ -8118,14 +8145,18 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
         <div class="v4-check-detail"><b>${esc(m2.decisor_papel || '')}</b> · ${esc(m2.decisor_evidencia || '')}${m2.empresa_familiar ? ' · <b style="color:#FDE68A">empresa familiar</b>' : ''}${tn.nota ? ` · <span style="opacity:.7">${esc(tn.nota)}</span>` : ''}</div></div>`;
     }
 
-    // recalcula cor
-    const conc = m2.is_concorrente === true;
-    const emp = m2.empresa_existe || (entry.m1 && entry.m1.empresa_existe);
-    const dec = entry.qsaMatch ? 'confirmado' : (stM2 || (entry.m1 && entry.m1.decisor_status));
-    if (!conc) {
-      const novaCor = emp === 'nao' ? 'vermelho' : (emp === 'sim' && dec === 'confirmado') ? 'verde' : 'amarelo';
-      repintarFarol(entry, novaCor, false);
-    }
+    // v23.4: AQUI estava a divergência que voltou quatro vezes.
+    //
+    // Este bloco é anterior ao sistema de boxes e repintava o farol com regra
+    // própria: "empresa existe E decisor confirmado → verde". Margem e
+    // concorrente nunca entravam na conta — e ele rodava DEPOIS do
+    // renderBoxes, sobrescrevendo o farol correto.
+    //
+    // Caso INSTITUTO PRESBITERIANO: empresa sim, decisor confirmado pelo QSA,
+    // margem amarela (ICP de R$ 400k com lead de R$ 71k) → os boxes diziam
+    // CAUTION, a trilha dizia CAUTION, e o card dizia GO.
+    //
+    // O farol agora sai de um lugar só: renderBoxes, a partir dos quatro boxes.
   }
 
   function renderM2(entry) {
