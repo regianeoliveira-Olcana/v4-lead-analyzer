@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      22.0
-// @description  v22.0 · le as aquisicoes, cruza com a analise e manda pro GHL automaticamente
+// @version      23.3
+// @description  v23.3 · farol conferido contra os boxes na tela — nao da mais pra divergir
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '22.0';
+  const VERSION = '23.3';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -1060,7 +1060,44 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
     try { renderDados(entry); }
     catch (e) { console.warn('[V4] renderDados falhou (farol já pintado):', e); }
-  }
+  
+    // ═══ AUTOVERIFICAÇÃO (v23.3) ═══
+    // O farol e os boxes já saem do mesmo cálculo, mas essa divergência voltou
+    // três vezes (v16.4, v17.12, v18.3) por caminhos diferentes — o último foi
+    // o INSTITUTO PRESBITERIANO, GO com decisor e margem amarelos.
+    //
+    // Em vez de confiar no cálculo, aqui a gente LÊ as cores que ficaram na
+    // tela e corrige o farol a partir delas. Se o box está amarelo no card,
+    // o farol lê amarelo. Não há como divergir.
+    try {
+      const pintados = [...entry.card.querySelectorAll('.v4-box')].map(el => {
+        for (const c of ['concorrente', 'vermelho', 'amarelo', 'verde']) {
+          if (el.classList.contains(c)) return c;
+        }
+        return null;
+      }).filter(Boolean);
+
+      if (pintados.length) {
+        const real = pintados.includes('concorrente') ? 'vermelho'
+          : pintados.includes('vermelho') ? 'vermelho'
+          : pintados.includes('amarelo') ? 'amarelo'
+          : 'verde';
+        if (real !== f.cor) {
+          console.warn('[V4] farol divergiu dos boxes:', f.cor, '→', real,
+                       '·', entry.extracted && entry.extracted.nomeEmpresa);
+          const conc = pintados.includes('concorrente');
+          f.cor = real;
+          f.rot = conc ? 'CONCORRENTE' : real === 'vermelho' ? 'STOP'
+                : real === 'amarelo' ? 'CAUTION' : 'GO';
+          f.luz = conc ? '🚨' : real === 'vermelho' ? '🔴'
+                : real === 'amarelo' ? '🟡' : '🟢';
+          f.conc = conc;
+          entry.farol = f;
+          repintarFarol(entry, real, conc);
+        }
+      }
+    } catch (e) { console.warn('[V4] autoverificação do farol:', e); }
+}
 
   function fmtCnpj(c) {
     const d = String(c || '').replace(/\D/g, '');
@@ -1862,22 +1899,37 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     tocarFilaM2();
   }
 
+  // v23.2: a fila rodava um lead por vez. Com 5 leads e 13s cada, passava de
+  // um minuto — e no leilão o lead já tinha ido embora.
+  //
+  // Agora roda 3 em paralelo. Não mais: as APIs limitam requisições por
+  // minuto, e estourar isso derruba tudo (o 429 da BrasilAPI que apareceu
+  // nos testes de hoje foi exatamente isso).
+  const M2_PARALELO = 3;
+
   async function tocarFilaM2() {
     if (rodandoM2 || !filaM2.length) return;
     rodandoM2 = true;
-    while (filaM2.length) {
-      const entry = filaM2.shift();
-      if (!entry || entry.m2 || !entry.card || !entry.card.isConnected) continue;
-      try {
-        marcarAutoM2(entry, true);
-        await doM2(entry);
-      } catch (e) {
-        console.warn('[V4] auto-M2 falhou:', e && e.message);
-      } finally {
-        marcarAutoM2(entry, false);
+
+    const trabalhar = async () => {
+      while (filaM2.length) {
+        const entry = filaM2.shift();
+        if (!entry || entry.m2 || !entry.card || !entry.card.isConnected) continue;
+        try {
+          marcarAutoM2(entry, true);
+          await doM2(entry);
+        } catch (e) {
+          console.warn('[V4] auto-M2 falhou:', e && e.message);
+        } finally {
+          marcarAutoM2(entry, false);
+        }
+        await new Promise(r => setTimeout(r, 250));   // respiro entre chamadas
       }
-      await new Promise(r => setTimeout(r, 400));   // respiro entre chamadas
-    }
+    };
+
+    // três trabalhadores puxando da mesma fila
+    const n = Math.min(M2_PARALELO, filaM2.length);
+    await Promise.all(Array.from({ length: n }, trabalhar));
     rodandoM2 = false;
   }
 
@@ -2113,6 +2165,39 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   }
 
   // ═══════════════════════════════════════════════════════════════
+  // MODO TIME (v23.0)
+  //
+  // Com o envio automático pro GHL, o SDR não precisa marcar nada — e vários
+  // botões do painel só servem pra quebrar coisa: limpar cache, limpar fila,
+  // limpar histórico, remover chaves. Nenhum resolve problema de verdade;
+  // o caminho pra isso é o Diagnóstico.
+  //
+  // Quem configurou as chaves nesta máquina (souDono) continua vendo tudo.
+  // Quem entrou pelo código do time vê só o que usa.
+  // ═══════════════════════════════════════════════════════════════
+  function modoTime() {
+    try { return !souDono(); } catch (e) { return true; }
+  }
+
+  function aplicarModoTime() {
+    if (!modoTime()) return;
+    const esconder = [
+      'v4-clear-cache',    // apaga cache
+      'v4-clear-queue',    // apaga a fila
+      'v4-hist-clear',     // apaga o histórico
+      'v4-key',            // remove as chaves
+      'v4-race',           // ajuste fino
+      'v4-model',          // ajuste fino
+      'v4-consumo',        // gestão de custo, não operação
+      'v4-export-json',    // exportação técnica
+    ];
+    for (const id of esconder) {
+      const e = document.getElementById(id);
+      if (e) e.style.display = 'none';
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   // AQUISIÇÕES → GHL (v22.0)
   //
   // Ninguém marca "Arrematei" na hora do leilão — a pressa é outra. Então o
@@ -2256,6 +2341,28 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     return linhas.filter(l => l.empresa);
   }
 
+  // v23.1: o dossiê precisa do entry completo (extracted, m1, m2, oficial,
+  // boxes), não só do resumo que vai pro histórico. Reconstrói a partir do
+  // texto bruto guardado, que é o que o cache preserva.
+  function entryDoHistorico(meta) {
+    if (!meta) return null;
+    try {
+      const bruto = meta.rawText || meta.raw || '';
+      if (!bruto) return null;
+      const cached = getCached(bruto);
+      if (!cached || !cached.m1) return null;
+      return {
+        id: 'ghl-' + Date.now(),
+        rawText: bruto,
+        extracted: preExtract(bruto),
+        m1: cached.m1,
+        m2: cached.m2 || null,
+        oficial: cached.oficial || null,
+        card: null,
+      };
+    } catch (e) { return null; }
+  }
+
   // ─── cruza a compra com a análise guardada ──────────────────────
   // O histórico tem o farol, os boxes e o dossiê. A ponte é o telefone
   // (sem máscara nas aquisições) ou o nome da empresa.
@@ -2313,7 +2420,30 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         const chave = (c.telefone || c.empresa).replace(/\D/g, '') || c.empresa;
         if (jaEnviado(chave)) continue;
 
-        const an = acharAnalise(c);
+        let an = acharAnalise(c);
+
+        // v23.1: o dossiê só é gerado para lead COMPRADO. Antes ele ficava num
+        // botão que ninguém clicava no leilão — e depois da compra o lead já
+        // tinha saído da tela. Aqui a compra já aconteceu: o investimento está
+        // feito, e alguns centavos de dossiê ao lado de centenas de reais de
+        // lead é decisão fácil.
+        //
+        // Bônus: sai depois do Momento 2, então com mais informação do que
+        // teria no momento do leilão.
+        if (an && !an.m3) {
+          try {
+            mostrarDica(`<b>Gerando dossiê</b><br>${esc(c.empresa)}`, 30000);
+            const entry = entryDoHistorico(an);
+            if (entry) {
+              const m3 = await runMomento3(entry);   // devolve o texto do dossiê
+              if (m3 && typeof m3 === 'string' && m3.length > 40) {
+                an = { ...an, m3 };
+                try { saveEntry({ ...entry, m3 }); } catch (e) {}
+              }
+            }
+          } catch (e) { console.warn('[V4] dossiê automático:', e); }
+        }
+
         const r = await enviarCompraParaGHL(c, an);
         if (r.erro) {
           console.warn('[V4] GHL falhou:', c.empresa, '·', r.erro);
@@ -6255,7 +6385,28 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // ═══════════════════════════════════════════════════════════════
   function buildLeadContext(ex) {
     const ei = ex.emailInfo || {};
-    return `LEAD:
+
+    // v23.2: quando o Serper já resolveu o CNPJ, a IA não precisa procurar a
+    // empresa — e era nisso que ela gastava boa parte dos 13 segundos.
+    // O aviso vem ANTES de tudo: instrução no fim de prompt longo costuma
+    // ser ignorada.
+    const jaResolvido = ex._cnpjResolvido ? [
+      '╔════════════════════════════════════════════════════════╗',
+      `║ ⚡ O CNPJ JÁ ESTÁ RESOLVIDO: ${ex._cnpjResolvido}`,
+      '╚════════════════════════════════════════════════════════╝',
+      'A empresa JÁ foi identificada e os dados da Receita estão abaixo.',
+      'NÃO busque CNPJ, razão social, endereço, porte ou data de abertura —',
+      'está tudo respondido.',
+      '',
+      'Gaste busca só com o que a Receita não diz:',
+      '  · o contato decide? (LinkedIn, site)',
+      '  · o que a empresa faz HOJE? (o CNAE registrado envelhece)',
+      'Duas buscas bastam.',
+      '',
+      '',
+    ].join('\n') : '';
+
+    return jaResolvido + `LEAD:
 Empresa declarada: ${ex.nomeEmpresa || '(não preenchido)'}
 Contato: ${ex.nomeContato || '(não preenchido)'}
 Cargo declarado: ${ex.cargo || '?'} (não confiar)
@@ -7306,12 +7457,13 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
         <div class="v4-farol-txt">${f.txt}</div>
         ${entry.farol && entry.farol.motivo && (cor === 'vermelho' || isConcorrente) ? `<div class="v4-farol-motivo">${esc(entry.farol.motivo.slice(0, 44))}</div>` : ''}
       </div>
-      <div class="v4-farol-sub">${entry.elapsed}s · ${esc((entry.m1 && entry.m1._src) || 'ia')}${entry.m1 && entry.m1._fallback
+      <div class="v4-farol-sub">${entry.elapsed}s${entry.elapsedM2 ? ` + ${entry.elapsedM2}s` : ''} · ${esc((entry.m1 && entry.m1._src) || 'ia')}${entry.m1 && entry.m1._fallback
         ? ` <span style="color:#F59E0B" title="O Gemini não respondeu a tempo e a análise veio da OpenAI, que não busca na web. Sem CNPJ, sem QSA — só o conhecimento do modelo. Clique em ↻ Refazer para tentar o Gemini de novo.">⤵ sem busca</span>`
         : ''}${(() => {
         // v18.7: quantas buscas o grounding realmente fez. Zero com o Gemini
         // ligado significa que ele respondeu só com o conhecimento do modelo —
         // e isso explica "empresa não existe" em empresa que o Google acha.
+        // v23.2: com M2, mostra os dois tempos — dava pra ver só o do M1
         const q = (entry.queriesM2 != null ? entry.queriesM2 : entry.queriesM1);
         if (q == null) return '';
         return q === 0
@@ -7772,13 +7924,15 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
         ${hasM2 ? '✓ aprofundado' : '🔍 Momento 2 — aprofundar'}
       </button>
       <button class="v4-act" data-act="refazer" style="border-color:#3A3A3A;color:#8A8A8A" title="Ignora o cache e consulta as APIs de novo">↻ Refazer</button>
+      ${modoTime() ? '' : `
       <button class="v4-act v4-act-m3" data-act="m3" ${hasM3 ? 'disabled' : ''}>
         ${hasM3 ? '✓ dossiê gerado' : '📄 Momento 3 — dossiê SDR'}
-      </button>
+      </button>`}
+      ${modoTime() ? '' : `
       <div class="v4-outcome-label">Resultado</div>
       <button class="v4-act ${entry.outcome === 'comprei' ? 'on' : ''}" data-out="comprei">Arrematei</button>
       <button class="v4-act ${entry.outcome === 'passei' ? 'on' : ''}" data-out="passei">Passei</button>
-      <button class="v4-act ${entry.outcome === 'cliente' ? 'on' : ''}" data-out="cliente">Virou cliente</button>
+      <button class="v4-act ${entry.outcome === 'cliente' ? 'on' : ''}" data-out="cliente">Virou cliente</button>`}
     `;
 
     w.querySelectorAll('[data-act]').forEach(b => {
@@ -7819,7 +7973,9 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     if (btn) btn.disabled = true;
 
     try {
+      const t0M2 = Date.now();
       const m2 = await runMomento2(entry.extracted, entry.m1 || {});
+      entry.elapsedM2 = ((Date.now() - t0M2) / 1000).toFixed(1);   // v23.2
       if (m2 && m2._uso && typeof m2._uso.queries === 'number') entry.queriesM2 = m2._uso.queries;
       entry.m2 = m2;
       computeFit(entry);
@@ -8832,6 +8988,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   // v9.23: os botões técnicos ficam escondidos atrás de "⚙ Config".
   // Menos chance de um SDR mexer em chave ou modelo por engano no meio do leilão.
   conectar('v4-config', 'click', () => {
+    setTimeout(aplicarModoTime, 30);   // v23.0
     const t = document.getElementById('v4-tec');
     const b = document.getElementById('v4-config');
     const on = t.style.display !== 'none';
@@ -8849,7 +9006,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   conectar('v4-close', 'click', closePanel);
   conectar('v4-add-btn', 'click', colarLeadManual);
   conectar('v4-clear-queue', 'click', clearQueue);
-  conectar('v4-open-hist', 'click', openHist);
+  conectar('v4-open-hist', 'click', () => { openHist(); setTimeout(aplicarModoTime, 40); });   // v23.0
   conectar('v4-hist-close', 'click', closeHist);
 
   conectar('v4-add-gemini', 'click', () => {
@@ -9325,6 +9482,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     GM_setValue('v4_race', on ? '0' : '1');
     renderRaceBtn();
   renderAutoM2Btn();
+  aplicarModoTime();   // v23.0: esconde o que o SDR não deve usar
 
   // v22.0: vigia a página de aquisições. A tabela é carregada por JS, então
   // observa mudanças no DOM em vez de ler uma vez só. O envio pro GHL acontece
