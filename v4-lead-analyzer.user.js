@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      23.5
-// @description  v23.5 · busca crua nao usa cidade de palpite nem nome generico (achou CNPJ de outra empresa)
+// @version      23.7
+// @description  v23.7 · empresa sem CNPJ e sem fonte nao fica verde (dizia "existe · sem fonte")
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '23.5';
+  const VERSION = '23.7';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -2189,12 +2189,79 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       'v4-race',           // ajuste fino
       'v4-model',          // ajuste fino
       'v4-consumo',        // gestão de custo, não operação
+      'v4-teto',           // idem
       'v4-export-json',    // exportação técnica
     ];
     for (const id of esconder) {
       const e = document.getElementById(id);
       if (e) e.style.display = 'none';
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // AVISO DE SALDO (v23.6)
+  //
+  // Crédito que acaba no meio do leilão é o pior momento pra descobrir:
+  // o Gemini estoura, a OpenAI não responde, e o lead passa sem análise.
+  //
+  // O script já media o consumo. Agora compara com um teto mensal e avisa
+  // em 70% e em 90% — uma vez cada, pra não virar ruído.
+  // ═══════════════════════════════════════════════════════════════
+  function tetoMensal() {
+    const v = parseFloat(GM_getValue('v4_teto_mes', '0'));
+    return isFinite(v) && v > 0 ? v : 0;
+  }
+
+  function checarSaldo() {
+    const teto = tetoMensal();
+    if (!teto) return;                       // sem teto definido, não avisa
+    let gasto = 0;
+    try {
+      const c = lerConsumo(mesAtual());
+      const p = precos();
+      gasto = calcularCusto(c, p).totalBrl || 0;
+    } catch (e) { return; }
+    if (!gasto) return;
+
+    const pct = gasto / teto;
+    const mes = mesAtual();
+    const ja = GM_getValue('v4_aviso_saldo', '');
+
+    const marco = pct >= 0.9 ? '90' : pct >= 0.7 ? '70' : null;
+    if (!marco) return;
+    const chave = `${mes}:${marco}`;
+    if (ja === chave || ja === `${mes}:90`) return;   // já avisou (90 cobre 70)
+
+    GM_setValue('v4_aviso_saldo', chave);
+    const urgente = marco === '90';
+    mostrarDica(
+      `<b>${urgente ? '🔴' : '🟡'} Consumo em ${Math.round(pct * 100)}% do teto</b><br>`
+      + `R$ ${gasto.toFixed(2)} de R$ ${teto.toFixed(2)} neste mês.<br>`
+      + (urgente
+        ? '<span style="opacity:.85">Recarregue antes que acabe no meio do leilão.</span>'
+        : '<span style="opacity:.85">Vale acompanhar em 📊 Consumo.</span>'),
+      urgente ? 20000 : 12000
+    );
+    console.warn(`[V4] consumo em ${Math.round(pct * 100)}% do teto mensal`);
+  }
+
+  function definirTeto() {
+    const atual = tetoMensal();
+    const v = prompt(
+      '💰 Teto de gasto mensal com APIs\n\n'
+      + 'O script avisa quando o consumo chegar a 70% e a 90% desse valor.\n'
+      + 'Assim o crédito não acaba no meio de um leilão.\n\n'
+      + 'Valor em reais (0 para desligar o aviso):',
+      atual ? String(atual) : '200'
+    );
+    if (v === null) return;
+    const n = parseFloat(String(v).replace(',', '.'));
+    if (!isFinite(n) || n < 0) return;
+    GM_setValue('v4_teto_mes', String(n));
+    GM_setValue('v4_aviso_saldo', '');        // zera os avisos já dados
+    mostrarDica(n > 0
+      ? `<b>Teto definido: R$ ${n.toFixed(2)}/mês</b><br>Aviso em 70% e em 90%.`
+      : '<b>Aviso de saldo desligado</b>', 6000);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2874,6 +2941,25 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
     if (m.empresa_existe === 'sim') {
       const fo = contarFontes(entry);
+
+      // v23.7: a IA dizer "existe" não bastava — o box ficava verde mesmo
+      // sem CNPJ e sem nenhuma fonte. Caso TIAGO ESPETINHOS: verde dizendo
+      // "existe · rastro online" com "sem fonte" logo abaixo.
+      //
+      // Sem CNPJ e sem fonte, a afirmação é só a opinião do modelo. Isso é
+      // amarelo: pode existir, mas não foi verificado.
+      // fo.empresa é um ARRAY de fontes — array vazio é truthy em JS,
+      // então !fo.empresa nunca seria true. Conta o tamanho.
+      const semFonte = !fo.empresa || !fo.empresa.length;
+      if (!temCnpj && semFonte) {
+        return {
+          cor: 'amarelo', titulo: 'Empresa',
+          txt: 'não verificada',
+          sub: 'a investigação afirma que existe, mas sem CNPJ e sem nenhuma fonte',
+          pendente: 'empresa',
+        };
+      }
+
       return {
         cor: 'verde', titulo: 'Empresa',
         txt: temCnpj ? 'existe · CNPJ ativo' : 'existe · rastro online',
@@ -4701,7 +4787,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         <button class="v4-btn-sec" id="v4-config">⚙ Mais opções</button>
         <span id="v4-tec" class="v4-tec-oculto">
           <button class="v4-btn-sec" id="v4-setup" style="border-color:#3B82F650;color:#93C5FD">🔑 Chaves</button>
-          <button class="v4-btn-sec" id="v4-consumo" style="border-color:#16A34A50;color:#4ADE80">📊 Consumo</button>
+          <button class="v4-btn-sec" id="v4-teto" style="border-color:#4A3A1A;color:#FDE68A">💰 Teto</button>
+        <button class="v4-btn-sec" id="v4-consumo" style="border-color:#16A34A50;color:#4ADE80">📊 Consumo</button>
           <button class="v4-btn-sec" id="v4-auto-m2">🔍 Auto-M2</button>
           <button class="v4-btn-sec v4-so-dono" id="v4-race">⚡⚡ Race</button>
           <button class="v4-btn-sec v4-so-dono" id="v4-model">🔧 Modelo</button>
@@ -7278,6 +7365,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       // v18.7: guardar quantas buscas o grounding fez neste lead. "Gemini ON"
       // só diz que a chave responde; isto diz se a busca aconteceu mesmo.
       if (m1 && m1._uso && typeof m1._uso.queries === 'number') entry.queriesM1 = m1._uso.queries;
+      try { checarSaldo(); } catch (e) {}   // v23.6
       entry.m1 = m1;
       entry.elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       const l2 = entry.card.querySelector('.v4-card-status-label');
@@ -9500,6 +9588,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   }
   conectar('v4-diag', 'click', diagnostico);
 
+  conectar('v4-teto', 'click', definirTeto);
   conectar('v4-consumo', 'click', abrirConsumo);
 
   conectar('v4-race', 'click', () => {
