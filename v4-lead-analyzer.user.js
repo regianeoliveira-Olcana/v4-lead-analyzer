@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      23.8
-// @description  v23.8 · busca crua chega antes da IA; GHL liga sem o Race; dossiê automático na compra
+// @version      24.0
+// @description  v24.0 · modo rápido: buscas em paralelo pelo Serper, Gemini só julga
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '23.8';
+  const VERSION = '24.0';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -2686,6 +2686,42 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // Regra: prefixo declarado que não bate = empresa errada. Os dados oficiais
   // são descartados; o lead segue pelo nome, com confiança menor.
   // ═══════════════════════════════════════════════════════════════
+  // v23.9: a praça do cadastro bate com a da Receita? Só serve para CONFIRMAR
+  // um CNPJ achado pelo nome — nunca para vetar um que o prefixo já provou.
+  // O DDD entra quando o lead não traz UF (portabilidade: aqui só deixa de
+  // confirmar, e a IA segue procurando).
+  function geoConfere(of, ex) {
+    if (!of || !ex) return false;
+    const uf2 = v => { const t = String(v || '').trim(); return /^[A-Za-z]{2}$/.test(t) ? t.toUpperCase() : null; };
+    const ufLead = uf2(ex.estado) || (ex.regiao && ex.regiao.uf) || null;
+    const ufOf = uf2(of.uf);
+    if (!ufLead || !ufOf || ufLead !== ufOf) return false;
+    const cidBruta = String(ex.cidade || '').split('/')[0].trim();
+    if (cidBruta && !/n[ãa]o informad/i.test(cidBruta) && of.municipio) {
+      const a = normalizarTexto(cidBruta), b = normalizarTexto(of.municipio);
+      if (!a.includes(b) && !b.includes(a)) return false;
+    }
+    return true;
+  }
+
+  // v23.9: adota ou descarta o CNPJ da busca crua. Puro, para dar pra testar.
+  function decidirBuscaCrua(r, emp, ex) {
+    if (!r || !r.cnpj) return { adota: false, receita: false, motivo: 'nada achado' };
+    if (r.casaPrefixo) {
+      const c0 = emp ? confrontarCnpj(emp.cnpj, ex && ex.cnpjParcial) : null;
+      return { adota: true, receita: !!emp && (!c0 || c0.bate), motivo: 'prefixo do cadastro confere' };
+    }
+    if (!(r.citaNome && !r.nomeGenerico)) {
+      return { adota: false, receita: false, motivo: 'sem prova de que é a empresa certa — a IA vai procurar' };
+    }
+    if (!emp) return { adota: false, receita: false, motivo: 'só o nome bateu e a Receita não respondeu a tempo' };
+    if (!geoConfere(emp, ex)) {
+      return { adota: false, receita: false,
+        motivo: 'só o nome bateu e a praça não confere (' + (emp.municipio || '?') + '/' + (emp.uf || '?') + ')' };
+    }
+    return { adota: true, receita: true, motivo: 'nome e praça conferem' };
+  }
+
   function confrontarCnpj(cnpjAchado, cnpjParcialDeclarado) {
     const achado = String(cnpjAchado || '').replace(/\D/g, '');
     const decl = String(cnpjParcialDeclarado || '').replace(/\D/g, '');
@@ -5957,13 +5993,27 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // ═══════════════════════════════════════════════════════════════
   // APIs
   // ═══════════════════════════════════════════════════════════════
-  function callGemini(sys, user, key, timeout) {
+  // v24.0: modo rápido — a busca é feita antes, pelo Serper, e o Gemini só
+  // julga os resultados. Sem a ferramenta de busca a resposta sai em 2-4s;
+  // com ela, eram 13-14s (o modelo decide, busca, lê e repete em rodadas).
+  function ajustarCorpoGemini(corpo, opts) {
+    if (!opts || !opts.semBusca) return corpo;
+    const c = Object.assign({}, corpo, {
+      generationConfig: Object.assign({}, corpo.generationConfig, {
+        thinkingConfig: { thinkingBudget: opts.thinking != null ? opts.thinking : 512 },
+      }),
+    });
+    delete c.tools;
+    return c;
+  }
+
+  function callGemini(sys, user, key, timeout, opts) {
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
         method: 'POST',
         url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
         headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify({
+        data: JSON.stringify(ajustarCorpoGemini({
           systemInstruction: { parts: [{ text: sys }] },
           contents: [{ role: 'user', parts: [{ text: user }] }],
           generationConfig: {
@@ -5988,7 +6038,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
             thinkingConfig: { thinkingBudget: 1024 },
           },
           tools: [{ google_search: {} }],
-        }),
+        }, opts)),
         timeout,
         onload(r) {
           try {
@@ -6823,13 +6873,13 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     return { texto: (r && r.texto) || '', uso: (r && r.uso) || null };
   }
 
-  async function executarIA(prompt, user, timeout, tag) {
+  async function executarIA(prompt, user, timeout, tag, opts) {
     const gk = GM_getValue('v4_gemini_key', '');
     const ok = GM_getValue('v4_openai_key', '');
     if (!gk && !ok) throw new Error('Nenhuma chave de IA configurada');
 
     const viaGemini = async () => {
-      const { texto, uso } = normalizarResposta(await callGemini(prompt, user, gk, timeout));
+      const { texto, uso } = normalizarResposta(await callGemini(prompt, user, gk, timeout, opts));
       registrarUso('gemini', uso, tag);
       const j = extractJson(texto); j._src = 'gemini'; j._uso = uso; return j;
     };
@@ -6840,7 +6890,7 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     };
 
     // race opcional: paga os dois pra ganhar 2-3s. Só se ligado no painel.
-    if (modoRace() && gk && ok) {
+    if (modoRace() && gk && ok && !(opts && opts.semBusca)) {
       try { return await Promise.any([viaGemini(), viaOpenAI()]); }
       catch (agg) { throw new Error((agg.errors || []).map(e => e.message).join(' · ') || 'todos falharam'); }
     }
@@ -6853,14 +6903,163 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
         console.warn(`[V4] ${tag}: gemini falhou (${e.message}) — tentando OpenAI`);
       }
     }
-    if (ok) {
+    // v24.0: no modo rápido a OpenAI não entra — quem assume é a busca completa
+    if (ok && !(opts && opts.soGemini)) {
       try { const r = await viaOpenAI(); r._fallback = !!gk; return r; }
       catch (e) { erros.push('openai: ' + e.message); }
     }
     throw new Error(erros.join(' · ') || 'nenhum provider respondeu');
   }
 
-  function runMomento1(ex) {
+  // ═══════════════════════════════════════════════════════════════
+  // MODO RÁPIDO (v24.0)
+  //
+  // Medido no caso ARMAZÉM: 17,0s no Momento 1 e 19,4s no Momento 2. Fora
+  // 1,4s de Serper e até 1,5s de Receita, todo o resto era o Gemini buscando
+  // sozinho — decide o que buscar, busca, lê, decide de novo, em rodadas.
+  //
+  // Aqui as buscas saem todas de uma vez pelo Serper (~1s, em paralelo) e o
+  // Gemini recebe os resultados prontos, sem ferramenta, só para julgar.
+  // Mesmo prompt, mesmas regras, mesmo JSON — os boxes não mudam.
+  //
+  // Se o Serper não trouxer nada ou o Gemini falhar, cai na busca completa.
+  // ═══════════════════════════════════════════════════════════════
+  const RAPIDO_TIMEOUT_MS = 12000;
+
+  const MODO_RAPIDO = `═══ MODO RÁPIDO — LEIA ANTES DE TUDO ═══
+Você NÃO tem ferramenta de busca nesta chamada. As buscas já foram feitas e os
+resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
+• Onde as instruções abaixo mandam buscar, procure nesses resultados.
+• Use só o que está neles e nos dados da Receita. Não invente URL, CNPJ nem cargo.
+• Resultado de outra empresa (outra cidade, outro ramo, homônimo) não prova nada —
+  as regras de homônimo e de prova de cargo valem do mesmo jeito.
+• Se os resultados não bastam para afirmar, a resposta certa é null, "parcial"
+  ou "indicio". Uma investigação mais funda roda depois, automaticamente.
+
+`;
+
+  function modoRapidoLigado() {
+    return GM_getValue('v4_rapido', '1') === '1'
+      && !!GM_getValue('v4_serper_key', '') && !!GM_getValue('v4_gemini_key', '');
+  }
+
+  // O que buscar, por momento. Puro — dá pra testar sem rede.
+  function planoDeBuscas(ex, momento) {
+    ex = ex || {};
+    const nome = String(ex.nomeEmpresa || '').trim();
+    const nucleo = nucleoDoNome(nome) || '';
+    // nome genérico ("instituto presbiteriano") vai inteiro, entre aspas
+    const GENERICO = /^(instituto|associa|funda|centro|col[ée]gio|escola|cl[íi]nica|academia|igreja|sociedade|cooperativa|grupo|casa)/i;
+    const termo = nucleo.length > 2 && !GENERICO.test(nucleo) ? nucleo : (nome ? `"${nome}"` : '');
+    if (!termo) return [];
+    // v23.5: só a cidade DECLARADA — a praça do DDD é palpite. A UF do DDD serve.
+    const cid = ex.cidade && !/n[ãa]o informad/i.test(ex.cidade) ? String(ex.cidade).split('/')[0].trim() : '';
+    const uf = (/^[A-Za-z]{2}$/.test(String(ex.estado || '').trim()) ? String(ex.estado).trim().toUpperCase() : '')
+      || (ex.regiao && ex.regiao.uf) || '';
+    // "Leandro Oliveira l vendas" → "Leandro Oliveira"
+    const contato = String(ex.nomeContato || '').replace(/\s+[l|\-–]\s+.*$/i, '').trim();
+    const junto = normalizarTexto(nome).replace(/[^a-z0-9]/g, '').slice(0, 30);
+    const ei = ex.emailInfo || {};
+
+    const q = [];
+    const add = (id, txt) => {
+      const t = String(txt).replace(/\s+/g, ' ').trim();
+      if (t && !q.some(x => x.q === t)) q.push({ id, q: t });
+    };
+
+    if (momento === 'M2') {
+      if (contato) add('socios', `"${contato}" sócio CNPJ ${uf}`);
+      add('cadastro', `site:casadosdados.com.br OR site:econodata.com.br ${termo} ${uf}`);
+      add('linkedin_empresa', `site:linkedin.com/company ${termo}`);
+      if (junto.length > 3) add('redes', `${junto} instagram OR facebook`);
+      add('marketplace', `${termo} ${cid || uf} "reclame aqui" OR "mercado livre" OR shopee`);
+      const sob = contato.split(/\s+/).filter(p => p.length > 3).slice(1).pop();
+      if (sob) add('familia', `"${sob}" ${termo} ${cid || uf}`);
+      return q.slice(0, 6);
+    }
+
+    add('empresa', `${termo} ${cid} ${uf}`);
+    if (contato) add('cruzado', `"${contato}" ${termo}`);
+    if (contato) add('linkedin', `site:linkedin.com/in "${contato}" ${termo}`);
+    if (ei.corporativo && ei.dominioFull) add('dominio', `site:${ei.dominioFull}`);
+    add('instagram', `${termo} ${cid} instagram`);
+    add('agencia', `${termo} agência OR marketing OR publicidade ${uf}`);
+    return q.slice(0, 6);
+  }
+
+  // Todas ao mesmo tempo. Uma que falha não derruba as outras.
+  async function buscasEmParalelo(plano) {
+    if (!plano || !plano.length) return [];
+    const t0 = Date.now();
+    const res = await Promise.all(plano.map(p => buscarWeb(p.q, 3500)
+      .then(r => Object.assign({ id: p.id }, r || { erro: 'sem chave' }, { query: p.q }))
+      .catch(e => ({ id: p.id, query: p.q, erro: e.message }))));
+    res.ms = Date.now() - t0;
+    return res;
+  }
+
+  function formatarResultados(res) {
+    const L = ['═══ RESULTADOS DA BUSCA (já feitas — use só isto) ═══'];
+    const vistos = new Set();
+    for (const r of res || []) {
+      if (!r) continue;
+      L.push('', `### ${r.query}`);
+      if (r.erro || !r.itens || !r.itens.length) { L.push('(sem resultado)'); continue; }
+      let n = 0;
+      for (const it of r.itens) {
+        if (n >= 5) break;
+        const chave = it.url || it.titulo;
+        if (chave && vistos.has(chave)) continue;
+        if (chave) vistos.add(chave);
+        n++;
+        const tr = String(it.trecho || '').replace(/\s+/g, ' ').slice(0, 240);
+        L.push(`${n}. ${String(it.titulo || '').slice(0, 120)}${it.url ? ' — ' + it.url : ''}`
+          + (tr ? `\n   ${tr}` : ''));
+      }
+      if (!n) L.push('(só repetições de resultados acima)');
+    }
+    return L.join('\n');
+  }
+
+  // O card mostra "N buscas" — sem isto mostraria "0 buscas ⚠", porque o
+  // Gemini não buscou nada: quem buscou foi o Serper.
+  function marcarRapido(j, res) {
+    if (!j) return j;
+    const feitas = (res || []).filter(r => r && !r.erro && r.query);
+    j._rapido = true;
+    j._src = 'gemini⚡';
+    j.buscas_feitas = feitas.map(r => r.query);
+    j._uso = Object.assign({}, j._uso || {}, { queries: feitas.length });
+    return j;
+  }
+
+  async function tentarRapido(prompt, user, ex, tag, buscasPre) {
+    if (!modoRapidoLigado()) return null;
+    const t0 = Date.now();
+    try {
+      const res = await (buscasPre || buscasEmParalelo(planoDeBuscas(ex, tag)));
+      const tBusca = Date.now() - t0;
+      if (!res || !res.some(r => r && r.itens && r.itens.length)) {
+        console.warn('[V4]', tag, 'rápido: busca sem resultado — indo pela busca completa');
+        return null;
+      }
+      const t1 = Date.now();
+      const j = await executarIA(MODO_RAPIDO + prompt, user + '\n\n' + formatarResultados(res),
+        RAPIDO_TIMEOUT_MS, tag,
+        { semBusca: true, soGemini: true, thinking: tag === 'M2' ? 1024 : 512 });
+      marcarRapido(j, res);
+      console.log('[V4]', tag, 'rápido · buscas', (res.ms || tBusca) + 'ms (espera',
+        tBusca + 'ms) · IA', (Date.now() - t1) + 'ms');
+      return j;
+    } catch (e) {
+      console.warn('[V4]', tag, 'rápido falhou (' + e.message + ') — indo pela busca completa');
+      return null;
+    }
+  }
+
+  async function runMomento1(ex, buscasPre) {
+    const r = await tentarRapido(M1_PROMPT, buildLeadContext(ex), ex, 'M1', buscasPre);
+    if (r) return r;
     return executarIA(M1_PROMPT, buildLeadContext(ex), M1_TIMEOUT_MS, 'M1');
   }
 
@@ -6869,6 +7068,11 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
 
 ═══ INVESTIGAÇÃO RÁPIDA (momento 1) — não fechou, aprofunde ═══
 ${JSON.stringify(m1, null, 2)}`;
+    const r = await tentarRapido(M2_PROMPT, user, ex, 'M2');
+    // "não existe" é o veredito mais caro. Com trechos de busca só, ele não
+    // fecha: se a empresa não saiu confirmada, a busca completa confere.
+    if (r && r.empresa_existe === 'sim') return r;
+    if (r) console.log('[V4] M2 rápido não confirmou a empresa — conferindo com a busca completa');
     return executarIA(M2_PROMPT, user, M2_TIMEOUT_MS, 'M2');
   }
 
@@ -7380,6 +7584,10 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       // v21.0: a busca crua roda EM PARALELO com a IA. Ela costuma terminar em
       // ~1s, então o CNPJ já está resolvido quando o M1 voltar — e a BrasilAPI
       // pode ser chamada sem esperar a IA descobrir o número.
+      // v24.0: as buscas do modo rápido saem junto com a do CNPJ
+      const buscasM1 = modoRapidoLigado()
+        ? buscasEmParalelo(planoDeBuscas(entry.extracted, 'M1')).catch(() => null) : null;
+
       const buscaCrua = acharCnpjPorBusca(entry.extracted)
         .then(r => {
           if (r && r.cnpj) {
@@ -7390,12 +7598,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
             // o aviso manda parar de procurar com o número errado na mão —
             // pior que não avisar. Caso INSTITUTO PRESBITERIANO: a busca trouxe
             // 07.293.861 e a empresa era 28.153.459.
-            const provado = r.casaPrefixo || (r.citaNome && !r.nomeGenerico);
-            if (provado && entry.extracted) {
-              entry.extracted._cnpjResolvido = fmtCnpj(r.cnpj);
-            } else {
-              console.log('[V4] sem prova de que é a empresa certa — a IA vai procurar');
-            }
+            // v23.9: a decisão de adotar saiu daqui — ver decidirBuscaCrua.
           }
           return r;
         })
@@ -7406,17 +7609,28 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       // Agora espera até 2,5s; com prova, a Receita entra no contexto antes.
       const rBusca = await Promise.race([buscaCrua,
         new Promise(r => setTimeout(() => r(null), 2500))]);
-      if (!oficialPromise && rBusca && rBusca.cnpj && entry.extracted._cnpjResolvido) {
-        oficialPromise = buscarOficial(rBusca.cnpj, entry.extracted);
-        const rOf = await Promise.race([oficialPromise,
+      //
+      // v23.9: caso ARMAZÉM CENTRAL GUARABIRA. Sem prefixo no cadastro, a busca
+      // por "armazem central" trouxe um restaurante de Jaboatão/PE; o lead é de
+      // Guarabira/PB. Dois termos do nome batendo não provam nada — a v23.8
+      // adotou a empresa errada e ainda mandou a IA não procurar.
+      // Agora: prefixo prova sozinho; nome só vale se a Receita confirmar a praça.
+      const temCandidato = rBusca && rBusca.cnpj
+        && (rBusca.casaPrefixo || (rBusca.citaNome && !rBusca.nomeGenerico));
+      if (!oficialPromise && temCandidato) {
+        const pOf = buscarOficial(rBusca.cnpj, entry.extracted);
+        const rOf = await Promise.race([pOf,
           new Promise(r => setTimeout(() => r(null), 1500))]);
-        if (rOf && rOf.empresa) {
-          const c0 = confrontarCnpj(rOf.empresa.cnpj, entry.extracted.cnpjParcial);
-          if (!c0 || c0.bate) entry.extracted._receita = rOf.empresa;
+        const d = decidirBuscaCrua(rBusca, rOf && rOf.empresa, entry.extracted);
+        if (d.adota) {
+          oficialPromise = pOf;
+          entry.extracted._cnpjResolvido = fmtCnpj(rBusca.cnpj);
+          if (d.receita) entry.extracted._receita = rOf.empresa;
         }
+        console.log('[V4] busca crua:', d.adota ? 'adotada' : 'descartada', '·', d.motivo);
       }
 
-      const m1 = await runMomento1(entry.extracted);
+      const m1 = await runMomento1(entry.extracted, buscasM1);
       // v18.7: guardar quantas buscas o grounding fez neste lead. "Gemini ON"
       // só diz que a chave responde; isto diz se a busca aconteceu mesmo.
       if (m1 && m1._uso && typeof m1._uso.queries === 'number') entry.queriesM1 = m1._uso.queries;
