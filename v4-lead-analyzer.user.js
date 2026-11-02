@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      23.7
-// @description  v23.7 · empresa sem CNPJ e sem fonte nao fica verde (dizia "existe · sem fonte")
+// @version      23.8
+// @description  v23.8 · busca crua chega antes da IA; GHL liga sem o Race; dossiê automático na compra
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '23.7';
+  const VERSION = '23.8';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -101,7 +101,7 @@ V4 = assessoria de marketing digital. Comprar lead de agência concorrente é jo
   Responder em 3 segundos aqui é o comportamento CORRETO.
 
 • VAI DIZER QUE NÃO ACHOU? SÓ DEPOIS DE ESGOTAR. Aí sim use o resto dos
-  15 segundos. Motivo: concluir "não achei" é barato de produzir (basta não
+  20 segundos. Motivo: concluir "não achei" é barato de produzir (basta não
   procurar) e caro pro negócio — rejeita empresa real e joga fora um lead bom.
   Errar pra "não existe" custa muito mais que gastar 10 segundos procurando.
 
@@ -272,7 +272,6 @@ RETORNE APENAS JSON:
       "cidade": "cidade/UF ou null", "papel": "Sócio-Administrador etc",
       "ramo": "o que faz, se souber", "e_a_do_lead": true|false|null }
   ],
-  "buscas_feitas": ["queries rodadas — obrigatório se empresa_existe = nao"],
   "decisor_papel": "cargo REAL achado — preencha sempre que a busca mostrar algum",
   "decisor_evidencia": "1 frase com fonte, ou null",
   "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
@@ -2412,21 +2411,31 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // boxes), não só do resumo que vai pro histórico. Reconstrói a partir do
   // texto bruto guardado, que é o que o cache preserva.
   function entryDoHistorico(meta) {
+    // v23.8: restaura o que os boxes precisam e recalcula o farol — sem isso
+    // o dossiê da compra saía sem o bloco "VEREDITO DO CARD".
     if (!meta) return null;
     try {
       const bruto = meta.rawText || meta.raw || '';
       if (!bruto) return null;
       const cached = getCached(bruto);
       if (!cached || !cached.m1) return null;
-      return {
+      const entry = {
         id: 'ghl-' + Date.now(),
         rawText: bruto,
         extracted: preExtract(bruto),
         m1: cached.m1,
         m2: cached.m2 || null,
         oficial: cached.oficial || null,
+        qsaMatch: cached.qsaMatch || null,
+        parentesco: cached.parentesco || null,
+        coerenciaPorte: cached.coerenciaPorte || null,
+        cnpjResolvido: cached.cnpjResolvido || null,
         card: null,
       };
+      if (entry.oficial) entry.natureza = lerNatureza(entry.oficial, entry.extracted.nomeContato);
+      try { entry.enriq = lerEnriquecimento(entry.extracted.enriquecimento); } catch (e) {}
+      try { entry.farol = calcularFarol(entry); } catch (e) { console.warn('[V4] farol do histórico:', e); }
+      return entry;
     } catch (e) { return null; }
   }
 
@@ -2434,24 +2443,36 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // O histórico tem o farol, os boxes e o dossiê. A ponte é o telefone
   // (sem máscara nas aquisições) ou o nome da empresa.
   function acharAnalise(compra) {
+    // v23.8: devolvia só o meta — sem rawText, m3 e telefone, que ficam no
+    // nível de cima do registro. O casamento por telefone nunca funcionava
+    // e o dossiê automático da compra nunca era gerado.
     let itens = [];
     try { itens = listHistory(); } catch (e) { return null; }
     const tel = String(compra.telefone || '').replace(/\D/g, '').slice(-9);
     const emp = normalizarTexto(compra.empresa || '');
     const nuc = normalizarTexto(nucleoDoNome(compra.empresa) || '');
 
+    const junta = (it) => {
+      const ex = it.extracted || {};
+      // e-mail mascarado ("***@gmail.com") não pode ir pro GHL
+      const email = ex.email && !/\*/.test(ex.email) ? ex.email : null;
+      return Object.assign({}, it.meta || {}, {
+        rawText: it.rawText || null, m3: it.m3 || null,
+        telefone: ex.telefone || null, email: email,
+      });
+    };
+
+    // telefone mascarado ("+55329*****") tem poucos dígitos — não casa
     for (const it of itens) {
-      const m = it.meta || it;
-      const t = String(m.telefone || '').replace(/\D/g, '').slice(-9);
-      if (tel && t && tel === t) return m;
+      const ex = it.extracted || {};
+      const t = String(ex.telefone || '').replace(/\D/g, '').slice(-9);
+      if (tel.length >= 8 && t.length >= 8 && tel === t) return junta(it);
     }
-    // sem telefone no histórico, casa pelo nome
     for (const it of itens) {
-      const m = it.meta || it;
-      const e = normalizarTexto(m.empresa || '');
+      const e = normalizarTexto((it.meta && it.meta.empresa) || '');
       if (!e) continue;
-      if (e === emp) return m;
-      if (nuc && nuc.length > 3 && e.includes(nuc)) return m;
+      if (e === emp) return junta(it);
+      if (nuc && nuc.length > 3 && e.includes(nuc)) return junta(it);
     }
     return null;
   }
@@ -2472,9 +2493,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
   let vigiaAtivo = false;
   async function vigiarAquisicoes() {
-    const { token, location } = ghlCfg();
-    if (!token || !location) return;
-    if (!/aquisi|acquisition|compras/i.test(location.href || window.location.href + document.title)) {
+    const { token, location: locId } = ghlCfg();
+    if (!token || !locId) return;
+    if (!/aquisi|acquisition|compras/i.test(window.location.href + ' ' + document.title)) {
       // só roda quando a página de aquisições está aberta
       if (!/Minhas Aquisi/i.test(document.body.textContent || '')) return;
     }
@@ -6486,6 +6507,24 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // ═══════════════════════════════════════════════════════════════
   // MOMENTO 1 — race paralelo Gemini + GPT
   // ═══════════════════════════════════════════════════════════════
+  function blocoReceita(ex) {
+    // v23.8: o aviso de CNPJ resolvido prometia "os dados da Receita estão
+    // abaixo" e não mandava nada. Agora manda, quando chegaram a tempo.
+    const rc = ex && ex._cnpjResolvido && ex._receita;
+    if (!rc) return '';
+    return [
+      'DADOS DA RECEITA (já consultados, não busque de novo):',
+      'Razão social: ' + (rc.razao_social || '?'),
+      'Nome fantasia: ' + (rc.nome_fantasia || '—'),
+      'Situação: ' + (rc.situacao || '?') + ' · abertura ' + (rc.abertura || '?')
+        + ' · porte ' + (rc.porte || '?'),
+      'CNAE: ' + (rc.cnae || '?'),
+      'Município: ' + ([rc.municipio, rc.uf].filter(Boolean).join('/') || '?'),
+      'QSA: ' + ((rc.qsa || []).map(s => s.nome).join(' · ') || '—'),
+      '', '',
+    ].join('\n');
+  }
+
   function buildLeadContext(ex) {
     const ei = ex.emailInfo || {};
 
@@ -6497,7 +6536,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       '╔════════════════════════════════════════════════════════╗',
       `║ ⚡ O CNPJ JÁ ESTÁ RESOLVIDO: ${ex._cnpjResolvido}`,
       '╚════════════════════════════════════════════════════════╝',
-      'A empresa JÁ foi identificada e os dados da Receita estão abaixo.',
+      ex._receita ? 'A empresa JÁ foi identificada e os dados da Receita estão abaixo.'
+                  : 'A empresa JÁ foi identificada pelo CNPJ.',
       'NÃO busque CNPJ, razão social, endereço, porte ou data de abertura —',
       'está tudo respondido.',
       '',
@@ -6509,7 +6549,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       '',
     ].join('\n') : '';
 
-    return jaResolvido + `LEAD:
+    return jaResolvido + blocoReceita(ex) + `LEAD:
 Empresa declarada: ${ex.nomeEmpresa || '(não preenchido)'}
 Contato: ${ex.nomeContato || '(não preenchido)'}
 Cargo declarado: ${ex.cargo || '?'} (não confiar)
@@ -7360,6 +7400,21 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
           return r;
         })
         .catch(() => null);
+
+      // v23.8: a IA era chamada sem esperar a busca crua, então o aviso de
+      // "CNPJ resolvido" nunca chegava ao prompt e ela procurava tudo do zero.
+      // Agora espera até 2,5s; com prova, a Receita entra no contexto antes.
+      const rBusca = await Promise.race([buscaCrua,
+        new Promise(r => setTimeout(() => r(null), 2500))]);
+      if (!oficialPromise && rBusca && rBusca.cnpj && entry.extracted._cnpjResolvido) {
+        oficialPromise = buscarOficial(rBusca.cnpj, entry.extracted);
+        const rOf = await Promise.race([oficialPromise,
+          new Promise(r => setTimeout(() => r(null), 1500))]);
+        if (rOf && rOf.empresa) {
+          const c0 = confrontarCnpj(rOf.empresa.cnpj, entry.extracted.cnpjParcial);
+          if (!c0 || c0.bate) entry.extracted._receita = rOf.empresa;
+        }
+      }
 
       const m1 = await runMomento1(entry.extracted);
       // v18.7: guardar quantas buscas o grounding fez neste lead. "Gemini ON"
@@ -9601,45 +9656,6 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     )) return;
     GM_setValue('v4_race', on ? '0' : '1');
     renderRaceBtn();
-  renderAutoM2Btn();
-  aplicarModoTime();   // v23.0: esconde o que o SDR não deve usar
-
-  // v22.0: vigia a página de aquisições. A tabela é carregada por JS, então
-  // observa mudanças no DOM em vez de ler uma vez só. O envio pro GHL acontece
-  // sem clique — da compra ao CRM em segundos.
-  (function ligarVigiaAquisicoes() {
-    let ultimo = 0;
-    const tentar = () => {
-      const agora = Date.now();
-      if (agora - ultimo < 2500) return;          // não martela o DOM
-      ultimo = agora;
-      try { vigiarAquisicoes(); } catch (e) { console.warn('[V4] vigia:', e); }
-    };
-    try {
-      new MutationObserver(tentar).observe(document.body, { childList: true, subtree: true });
-      setTimeout(tentar, 1500);
-    } catch (e) {}
-  })();
-
-  conectar('v4-auto-m2', 'click', () => {
-    const novo = autoM2Ligado() ? '0' : '1';
-    GM_setValue('v4_auto_m2', novo);
-    renderAutoM2Btn();
-    mostrarDica(novo === '1'
-      ? '<b>Auto-M2 ligado</b><br>O Momento 2 roda sozinho quando houver box amarelo ou vermelho.'
-      : '<b>Auto-M2 desligado</b><br>O Momento 2 só roda quando você clicar.', 4000);
-  });
-
-  // v12.1: quem recebeu a instalação por código não é dono — esconde os botões
-  // que só fazem sentido pra quem administra as chaves e o custo.
-  // O time vê: Histórico · Auto · Diagnóstico · Mais opções → Chaves, Consumo · Cache
-  (function ajustarRodapePorPerfil() {
-    const dono = GM_getValue('v4_dono', '') === '1';
-    if (dono) return;
-    document.querySelectorAll('.v4-so-dono').forEach(el => { el.style.display = 'none'; });
-    const s = document.getElementById('v4-setup');
-    if (s) s.textContent = '🔑 Colar código';
-  })();
   });
   renderRaceBtn();
   renderAutoM2Btn();
@@ -9656,11 +9672,32 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   // que só fazem sentido pra quem administra as chaves e o custo.
   // O time vê: Histórico · Auto · Diagnóstico · Mais opções → Chaves, Consumo · Cache
   (function ajustarRodapePorPerfil() {
-    const dono = GM_getValue('v4_dono', '') === '1';
+    const dono = souDono();   // v23.8: mesma regra do resto do script
     if (dono) return;
     document.querySelectorAll('.v4-so-dono').forEach(el => { el.style.display = 'none'; });
     const s = document.getElementById('v4-setup');
     if (s) s.textContent = '🔑 Colar código';
+  })();
+
+  // v23.8: estes dois blocos estavam DENTRO do clique do Race. A vigia do
+  // GHL só começava depois de alguém clicar nele — e o time nem vê o botão.
+  aplicarModoTime();   // v23.0
+
+  // v22.0: vigia a página de aquisições. A tabela é carregada por JS, então
+  // observa mudanças no DOM em vez de ler uma vez só. O envio pro GHL acontece
+  // sem clique — da compra ao CRM em segundos.
+  (function ligarVigiaAquisicoes() {
+    let ultimo = 0;
+    const tentar = () => {
+      const agora = Date.now();
+      if (agora - ultimo < 2500) return;          // não martela o DOM
+      ultimo = agora;
+      try { vigiarAquisicoes(); } catch (e) { console.warn('[V4] vigia:', e); }
+    };
+    try {
+      new MutationObserver(tentar).observe(document.body, { childList: true, subtree: true });
+      setTimeout(tentar, 1500);
+    } catch (e) {}
   })();
 
   conectar('v4-model', 'click', () => {
