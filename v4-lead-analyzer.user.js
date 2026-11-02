@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      24.0
-// @description  v24.0 · modo rápido: buscas em paralelo pelo Serper, Gemini só julga
+// @version      24.3
+// @description  v24.3 · prompts próprios do modo rápido; URL e CNPJ da IA conferidos contra a busca
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '24.0';
+  const VERSION = '24.3';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -1709,6 +1709,32 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       .toUpperCase();
   }
 
+  // v24.2: caso HS SCA — contato Heliodoro Scalercio. O nome da empresa é
+  // iniciais ("HS") + começo do sobrenome ("SCA"lercio). A checagem de sigla
+  // pura (J N V = Jose Nelio Vanço) não pegava a mistura.
+  // Não prova cargo — é indício forte de que o contato é o dono.
+  function nomeVemDoContato(nomeEmpresa, nomeContato) {
+    if (!nomeEmpresa || !nomeContato) return null;
+    const toks = normalizarTexto(nomeEmpresa)
+      .replace(/\b(ltda|me|epp|eireli|sa|comercio|industria|servicos|e|de|da|do|dos|das)\b/g, ' ')
+      .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+    if (toks.length < 2 || toks.length > 3) return null;
+    const partes = partesNome(nomeContato).filter(p => p.length > 1);
+    if (partes.length < 2) return null;
+    const ini = partes.map(p => p[0]).join('');
+    let porIniciais = 0, porPedaco = 0;
+    for (const t of toks) {
+      if (t.length >= 2 && t.length <= 4 && ini.includes(t)) { porIniciais++; continue; }
+      if (t.length >= 3 && partes.some(p => p.length >= t.length + 2 && p.startsWith(t))) { porPedaco++; continue; }
+      return null;
+    }
+    if (!porIniciais || !porPedaco) return null;
+    return {
+      texto: `"${nomeEmpresa}" vem do nome de ${nomeContato} — iniciais e começo do sobrenome`,
+      composto: true,
+    };
+  }
+
   function checarIniciais(nomeEmpresa, nomeContato) {
     if (!nomeEmpresa || !nomeContato) return null;
     // só a parte distintiva do nome — tira LTDA, ME, COMERCIO e afins
@@ -1843,6 +1869,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       const s = String(v || '').trim();
       if (!s || s.length > 90) return false;
       if (/n[ãa]o (foi )?(encontrad|localizad|identificad|h[áa])|sem (perfil|site|resultado)|n\/a|n[ãa]o informad/i.test(s)) return false;
+      // v24.2: caso HS SCA — "hsuniformes.com.br (inferido do e-mail)" contava
+      // como fonte e deixava o box Empresa verde. Palpite não é fonte.
+      if (/inferid|dedu[zç]|suposi|presum|provavelmente|possivelmente|n[ãa]o verificad|n[ãa]o confirmad|a confirmar/i.test(s)) return false;
       return /\.|@|instagram\.com|linkedin\.com|^[\w.-]+$/.test(s);
     };
     if (fonteReal(m.site)) f.empresa.push('site');
@@ -2566,9 +2595,37 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // ═══════════════════════════════════════════════════════════════
   const SERPER_URL = 'https://google.serper.dev/search';
 
-  function buscarWeb(query, timeout = 4000) {
+  // v24.1: caso CLORO MATO GROSSO — 6 buscas "em paralelo" levaram 7,4s.
+  // O Chrome abre no máximo 6 conexões por servidor; com a busca do CNPJ
+  // eram 7 ao mesmo tempo, uma entrava na fila e a rodada dobrava. Com o
+  // Momento 2 de outros leads rodando junto, piorava.
+  // Agora há uma fila própria: no máximo 6 no ar, e as do Momento 1 (que
+  // decidem o lance) passam na frente das do Momento 2.
+  const SERPER_MAX = 6;
+  let serperNoAr = 0;
+  const serperFilaAlta = [], serperFilaBaixa = [];
+
+  function vezNoSerper(alta) {
+    return new Promise(res => {
+      if (serperNoAr < SERPER_MAX) { serperNoAr++; return res(); }
+      (alta ? serperFilaAlta : serperFilaBaixa).push(res);
+    });
+  }
+
+  function liberarSerper() {
+    const prox = serperFilaAlta.shift() || serperFilaBaixa.shift();
+    if (prox) prox(); else serperNoAr = Math.max(0, serperNoAr - 1);
+  }
+
+  async function buscarWeb(query, timeout = 4000, alta = true) {
     const key = GM_getValue('v4_serper_key', '');
-    if (!key || !query) return Promise.resolve(null);
+    if (!key || !query) return null;
+    await vezNoSerper(alta);
+    try { return await buscarWebDireto(query, timeout, key); }
+    finally { liberarSerper(); }
+  }
+
+  function buscarWebDireto(query, timeout, key) {
     return new Promise(resolve => {
       const t0 = Date.now();
       GM_xmlhttpRequest({
@@ -2660,11 +2717,15 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (px.length >= 4) queries.push(`${px} CNPJ ${cidade}`.replace(/\s+/g, ' ').trim());
     if (!queries.length) return null;
 
-    for (const q of queries) {
-      const r = await buscarWeb(q);
+    // v24.1: em paralelo e no máximo 2. Em série eram até 3 × 3s — 9,4s no
+    // CLORO MATO GROSSO. A ordem continua sendo a de prioridade.
+    const usar = queries.slice(0, 2);
+    const rs = await Promise.all(usar.map(q => buscarWeb(q, 4000, true).catch(() => null)));
+    for (let i = 0; i < rs.length; i++) {
+      const r = rs[i];
       if (!r || r.erro) continue;
       const achado = garimparCnpj(r, px, ex.nomeEmpresa);
-      if (achado) return { ...achado, query: q, ms: r.ms };
+      if (achado) return { ...achado, query: usar[i], ms: r.ms };
     }
     return null;
   }
@@ -3411,6 +3472,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // caminho dos homônimos devolvia amarelo no mesmo estado (caso FRPARTSGYN).
     // Agora é sempre AMARELO: não saber quem decide é lacuna a resolver na
     // ligação, não motivo pra descartar o lead.
+    // v24.2: quando o nome da empresa sai do nome do contato, o box diz isso —
+    // é a pista que o SDR usa na abertura. A cor não muda: não é prova.
+    if (entry.iniciais) {
+      return { cor: 'amarelo', titulo: 'Decisor',
+        txt: 'provável dono',
+        sub: 'o nome da empresa vem do nome dele — confirme na abertura',
+        pendente: 'decisor' };
+    }
     return { cor: 'amarelo', titulo: 'Decisor',
       txt: 'não confirmado',
       sub: entry.m2 ? 'a investigação não achou o vínculo — pergunte na abertura'
@@ -6873,6 +6942,20 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     return { texto: (r && r.texto) || '', uso: (r && r.uso) || null };
   }
 
+  // v24.2: caso HS SCA — sem achar nada, a IA escreveu "Uniformes (inferido
+  // do e-mail)" no ramo e "hsuniformes.com.br (inferido do e-mail)" no site.
+  // O prompt proíbe derivar ramo sem evidência; aqui o código garante.
+  // Campo que se declara palpite vira vazio — "não achei" vale mais.
+  function limparPalpites(j) {
+    if (!j || typeof j !== 'object') return j;
+    const PALPITE = /inferid|dedu[zç]|suposi|presum|provavelmente|possivelmente|n[ãa]o verificad|n[ãa]o confirmad|a confirmar/i;
+    for (const k of ['site', 'instagram', 'linkedin_empresa', 'linkedin_contato',
+                     'ramo_aparente', 'ramo_real', 'endereco']) {
+      if (j[k] && PALPITE.test(String(j[k]))) j[k] = null;
+    }
+    return j;
+  }
+
   async function executarIA(prompt, user, timeout, tag, opts) {
     const gk = GM_getValue('v4_gemini_key', '');
     const ok = GM_getValue('v4_openai_key', '');
@@ -6881,12 +6964,12 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     const viaGemini = async () => {
       const { texto, uso } = normalizarResposta(await callGemini(prompt, user, gk, timeout, opts));
       registrarUso('gemini', uso, tag);
-      const j = extractJson(texto); j._src = 'gemini'; j._uso = uso; return j;
+      const j = limparPalpites(extractJson(texto)); j._src = 'gemini'; j._uso = uso; return j;
     };
     const viaOpenAI = async () => {
       const { texto, uso } = normalizarResposta(await callOpenAISearch(prompt, user, ok, timeout));
       registrarUso('gpt', uso, tag);
-      const j = extractJson(texto); j._src = 'gpt'; j._uso = uso; return j;
+      const j = limparPalpites(extractJson(texto)); j._src = 'gpt'; j._uso = uso; return j;
     };
 
     // race opcional: paga os dois pra ganhar 2-3s. Só se ligado no painel.
@@ -6926,17 +7009,184 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
   // ═══════════════════════════════════════════════════════════════
   const RAPIDO_TIMEOUT_MS = 12000;
 
-  const MODO_RAPIDO = `═══ MODO RÁPIDO — LEIA ANTES DE TUDO ═══
+  const MODO_RAPIDO = `═══ MODO RÁPIDO ═══
 Você NÃO tem ferramenta de busca nesta chamada. As buscas já foram feitas e os
-resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
-• Onde as instruções abaixo mandam buscar, procure nesses resultados.
-• Use só o que está neles e nos dados da Receita. Não invente URL, CNPJ nem cargo.
-• Resultado de outra empresa (outra cidade, outro ramo, homônimo) não prova nada —
-  as regras de homônimo e de prova de cargo valem do mesmo jeito.
-• Se os resultados não bastam para afirmar, a resposta certa é null, "parcial"
-  ou "indicio". Uma investigação mais funda roda depois, automaticamente.
+resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA". Julgue só o que
+está ali e nos dados da Receita.
 
 `;
+
+  // ═══════════════════════════════════════════════════════════════
+  // PROMPTS DO MODO RÁPIDO (v24.3)
+  //
+  // A v24.0 reaproveitava o M1_PROMPT, escrito para o Gemini COM busca, com
+  // um aviso no topo dizendo que não havia busca. Eram duas ordens que se
+  // contradiziam — "busque o handle, use o resto dos 20 segundos" contra
+  // "use só os resultados". Sem resultado, o modelo cumpria o prompt do jeito
+  // que dava: "hsuniformes.com.br (inferido do e-mail)" no HS SCA, e
+  // "o CNPJ fornecido" no ARMAZÉM.
+  //
+  // Estes são escritos para JULGAR trechos de busca: nenhuma instrução de
+  // buscar, e "sem resultado" tem resposta definida em cada pergunta.
+  // As regras de negócio (veto de concorrente, prova de cargo, alçada) são
+  // as mesmas, e o JSON tem os mesmos campos que os boxes leem.
+  // ═══════════════════════════════════════════════════════════════
+  const REGRAS_RAPIDO = `Auditor de leads B2B da V4 Company (assessoria de marketing digital) num leilão.
+Você recebe o cadastro do lead, os RESULTADOS DA BUSCA e, às vezes, os DADOS DA
+RECEITA. Você não busca nada: julga o que está na mensagem.
+
+O cadastro é autorreportado e costuma vir errado: nome incompleto, vários negócios
+num nome só, cargo inflado, segmento que descreve o que o cliente QUER contratar.
+
+═══ PASSO 0 — QUAIS RESULTADOS SÃO DESTE LEAD ═══
+Antes de responder, separe o que é desta empresa do que é de outra.
+É desta empresa quando bate pelo menos um destes, sem contradição:
+  • CNPJ que começa com os dígitos do cadastro
+  • domínio igual ao do e-mail do contato
+  • nome da empresa + mesma cidade ou UF do lead
+  • nome do contato ligado ao nome da empresa
+Mesmo nome em outra cidade ou UF, ou outro ramo sem ligação, é HOMÔNIMO: não serve
+como prova de nada. Liste em homonimos_encontrados só os confundíveis (no Brasil,
+ramo plausível). O DDD do telefone só desempata — o número acompanha a pessoa.
+Se a Receita veio na mensagem, ela é a fonte oficial desta empresa.
+
+═══ CONCORRENTE ═══
+true  → um resultado DESTA empresa mostra que ela presta a TERCEIROS: marketing,
+        publicidade, tráfego pago, geração de leads, consultoria comercial ou de
+        vendas, SDR terceirizado, mentoria ou treinamento de vendas/marketing.
+false → resultados desta empresa mostram outro ramo.
+null  → empresa não identificada, ou nada sobre o ramo.
+• Nome que lembra agência ("Digital", "Mídia", "Performance") não basta:
+  null e concorrente_suspeita = true.
+• Quem procura ou quer contratar marketing é CLIENTE.
+• O campo "Segmento" do formulário não conta.
+
+═══ EMPRESA ═══
+"sim"     → um resultado DESTA empresa (site, perfil, cadastro, Maps) ou a Receita.
+"parcial" → só homônimos, só indícios, ou nada nos resultados. Esta busca é rasa
+            e uma investigação mais funda roda depois: sem resultado, é "parcial".
+"nao"     → só quando os resultados MOSTRAM que ela não existe (ex.: CNPJ baixado
+            e nenhuma outra empresa ativa). Ausência de resultado NÃO é "nao".
+site, instagram, linkedin_empresa, linkedin_contato: copie EXATAMENTE de um
+resultado desta empresa. Nunca monte endereço a partir do e-mail ou do nome.
+
+═══ DECISOR ═══
+VALE como prova: QSA da Receita, Casa dos Dados, Econodata, LinkedIn com o cargo
+NESTA empresa, página de equipe do site, notícia que nomeia como sócio/fundador/
+diretor, registro de classe (OAB, CRM, CRO, CREA).
+NÃO VALE: avaliação, comentário, depoimento, nome parecido, cargo do formulário.
+Alçada pelo faturamento declarado:
+  até R$ 399k/mês → sócio, dono ou fundador
+  R$ 400k–1M      → sócio ou diretor
+  R$ 1M–4M        → sócio, diretor ou C-level
+  R$ 4M+          → diretor, head ou gerente sênior
+decisor_status:
+  "confirmado" → cargo provado E com alçada
+  "sem_alcada" → cargo provado, sem alçada (assistente, analista, gerente em
+                 empresa pequena) — o lead segue bom
+  "indicio"    → sinal isolado
+  "nao"        → nada sobre a pessoa
+decisor_papel: o cargo que o resultado mostra, escrito seco ("Sócio-Administrador").
+Sem prova, null.
+Se o contato é sócio ou administrador de OUTRAS empresas, liste em outras_empresas,
+com o CNPJ só se ele aparece no resultado. Se o cadastro trouxe dígitos do CNPJ,
+compare: a empresa cujo CNPJ começa com eles é a do lead (e_a_do_lead = true).
+
+═══ REGRAS DURAS ═══
+• Só o que está nos resultados ou na Receita. Campo sem base = null.
+• Nada de "inferido", "provavelmente", "presumido", "pode ser" em campo nenhum:
+  palpite é null.
+• Ramo: o que ESTA empresa faz segundo os resultados. Nunca derive do e-mail, do
+  nome ou do campo Segmento.
+• cnpj_descoberto: só se aparece num resultado desta empresa ou na Receita. Com
+  dígitos no cadastro, tem que começar com eles.`;
+
+  const M1_RAPIDO_PROMPT = REGRAS_RAPIDO + `
+
+RETORNE APENAS JSON:
+{
+  "is_concorrente": true|false|null,
+  "concorrente_suspeita": true|false,
+  "concorrente_evidencia": "1 frase citando o resultado, ou null",
+  "empresa_existe": "sim"|"parcial"|"nao",
+  "empresa_evidencia": "quais resultados são DESTA empresa",
+  "homonimos_encontrados": [],
+  "site": "URL copiada de um resultado, ou null",
+  "instagram": "@ copiado de um resultado, ou null",
+  "ramo_aparente": "o que esta empresa faz, ou null",
+  "decisor_status": "confirmado"|"sem_alcada"|"indicio"|"nao",
+  "decisor_papel": "cargo provado, ou null",
+  "decisor_evidencia": "1 frase citando o resultado, ou null",
+  "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
+  "linkedin_contato": "URL ou null",
+  "linkedin_empresa": "URL ou null",
+  "contato_na_aba_pessoas": true|false|null,
+  "funcionarios_linkedin": "faixa ou null",
+  "cargo_declarado_confere": true|false|null,
+  "outras_empresas": [
+    { "nome": "razão social ou fantasia", "cnpj": "CNPJ ou null", "cidade": "cidade/UF ou null",
+      "papel": "Sócio-Administrador etc", "ramo": "o que faz, ou null", "e_a_do_lead": true|false|null }
+  ],
+  "cnpj_descoberto": "CNPJ ou null",
+  "resumo": "1 frase com o que os campos acima não dizem, ou null"
+}`;
+
+  const M2_RAPIDO_PROMPT = REGRAS_RAPIDO + `
+
+═══ APROFUNDAMENTO (momento 2) ═══
+A investigação rápida (no contexto) não fechou. Estes resultados são mais fundos:
+cadastros (Casa dos Dados, Econodata), sócios no nome do contato, LinkedIn da
+empresa, redes, marketplaces e sobrenome. Use-os para resolver o que ficou aberto.
+• RAMO REAL: específico ("indústria de produtos de limpeza", não "indústria").
+  Não estime margem, EBITDA nem lucro — a régua de margem é aplicada no código.
+• FAMÍLIA: contato com o mesmo sobrenome de um sócio no QSA é provável familiar
+  (filho, cônjuge, irmão) — empresa_familiar = true. Não é decisor confirmado.
+• EMPRESAS DO CONTATO: liste todas em que ele aparece como sócio. Ter outras
+  empresas é sinal BOM (é dono, decide). Diga se ficam em outra cidade.
+• COERÊNCIA: faturamento × porte, cidade × endereço, nome × domínio do e-mail,
+  cargo declarado × cargo real. DDD diferente da UF NÃO é contradição.
+• Se a sua leitura diverge do momento 1, diga por quê no resumo.
+
+RETORNE APENAS JSON:
+{
+  "is_concorrente": true|false|null,
+  "concorrente_evidencia": "frase ou null",
+  "empresa_existe": "sim"|"parcial"|"nao",
+  "empresa_evidencia": "fontes desta empresa",
+  "homonimos_encontrados": [],
+  "site": "URL copiada de um resultado, ou null",
+  "instagram": "@ copiado de um resultado, ou null",
+  "endereco": "endereço ou null",
+  "ramo_real": "o que a empresa vende, específico, ou null",
+  "ramo_confianca": "alta"|"media"|"baixa",
+  "decisor_confirmado": "sim"|"parcial"|"nao",
+  "decisor_status": "confirmado"|"sem_alcada"|"indicio"|"nao",
+  "decisor_papel": "cargo provado, ou null",
+  "decisor_evidencia": "frase citando o resultado, ou null",
+  "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
+  "linkedin_contato": "URL ou null",
+  "linkedin_empresa": "URL ou null",
+  "contato_na_aba_pessoas": true|false|null,
+  "funcionarios_linkedin": "faixa ou null",
+  "vagas_abertas": [],
+  "outras_empresas": [
+    { "nome": "razão social ou fantasia", "cnpj": "CNPJ ou null", "cidade": "cidade/UF ou null",
+      "papel": "Sócio-Administrador etc", "ramo": "o que faz, ou null", "e_a_do_lead": true|false|null }
+  ],
+  "cargo_declarado_confere": true|false|null,
+  "dominio_confere": true|false|null,
+  "empresa_familiar": true|false|null,
+  "parentesco_provavel": "filho/cônjuge/irmão/sócio informal, ou null",
+  "cnpj_descoberto": "CNPJ ou null",
+  "contradicoes": ["declarado X vs achado Y"],
+  "red_flags": [],
+  "resumo": "2 frases: o que mudou em relação ao momento 1"
+}`;
+
+  // v24.3: _resultados, _uso e afins são do script, não do prompt
+  function semInternos(o) {
+    return JSON.stringify(o, (k, v) => (k && k[0] === '_') ? undefined : v, 2);
+  }
 
   function modoRapidoLigado() {
     return GM_getValue('v4_rapido', '1') === '1'
@@ -6983,15 +7233,16 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
     if (contato) add('linkedin', `site:linkedin.com/in "${contato}" ${termo}`);
     if (ei.corporativo && ei.dominioFull) add('dominio', `site:${ei.dominioFull}`);
     add('instagram', `${termo} ${cid} instagram`);
-    add('agencia', `${termo} agência OR marketing OR publicidade ${uf}`);
-    return q.slice(0, 6);
+    // v24.1: 4 no Momento 1 — com as 2 do CNPJ, cabem numa rodada só.
+    // A checagem de agência sai dos próprios resultados (site, Instagram, CNAE).
+    return q.slice(0, 4);
   }
 
   // Todas ao mesmo tempo. Uma que falha não derruba as outras.
-  async function buscasEmParalelo(plano) {
+  async function buscasEmParalelo(plano, alta = true) {
     if (!plano || !plano.length) return [];
     const t0 = Date.now();
-    const res = await Promise.all(plano.map(p => buscarWeb(p.q, 3500)
+    const res = await Promise.all(plano.map(p => buscarWeb(p.q, 4000, alta)
       .then(r => Object.assign({ id: p.id }, r || { erro: 'sem chave' }, { query: p.q }))
       .catch(e => ({ id: p.id, query: p.q, erro: e.message }))));
     res.ms = Date.now() - t0;
@@ -7021,6 +7272,53 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
     return L.join('\n');
   }
 
+  // v24.3: o que a IA devolve como URL ou CNPJ tem que estar nos resultados.
+  // Regra dura no prompt não basta — o código confere. Caso HS SCA: site
+  // montado a partir do e-mail, sem resultado nenhum que o mostrasse.
+  function ancorarNosResultados(j, res, ex) {
+    if (!j || typeof j !== 'object') return j;
+    const blob = normalizarTexto((res || []).map(r => ((r && r.itens) || [])
+      .map(it => `${it.titulo || ''} ${it.trecho || ''} ${it.url || ''}`).join(' ')).join(' '));
+    const soDig = blob.replace(/[^0-9]/g, '');
+    const receita = ex && ex._receita ? String(ex._receita.cnpj || '').replace(/\D/g, '') : '';
+    const cnpjOk = c => {
+      const d = String(c || '').replace(/\D/g, '');
+      return d.length === 14 && (d === receita || soDig.includes(d));
+    };
+    const dominio = u => normalizarTexto(String(u || '')).replace(/^https?:\/\//, '')
+      .replace(/^www\./, '').split(/[\/?#\s]/)[0];
+
+    if (j.cnpj_descoberto && !cnpjOk(j.cnpj_descoberto)) j.cnpj_descoberto = null;
+    if (j.site) { const d = dominio(j.site); if (!d || !blob.includes(d)) j.site = null; }
+    if (j.instagram) {
+      const h = normalizarTexto(j.instagram).replace(/^.*instagram\.com\//, '').replace(/^@/, '')
+        .split(/[\/?\s]/)[0];
+      if (!h || h.length < 3 || !blob.includes(h)) j.instagram = null;
+    }
+    for (const k of ['linkedin_contato', 'linkedin_empresa']) {
+      if (!j[k]) continue;
+      const slug = normalizarTexto(j[k]).replace(/\/+$/, '').split('/').filter(Boolean).pop();
+      if (!slug || slug.length < 3 || !blob.includes(slug)) j[k] = null;
+    }
+    if (Array.isArray(j.outras_empresas)) {
+      for (const e of j.outras_empresas) if (e && e.cnpj && !cnpjOk(e.cnpj)) e.cnpj = null;
+    }
+    return j;
+  }
+
+  // Guardado no histórico: com o que a IA julgou, dá pra repetir o caso
+  // depois e testar um prompt novo contra a mesma entrada.
+  function compactarResultados(res) {
+    return (res || []).filter(r => r && r.query).map(r => ({
+      query: r.query,
+      itens: ((r && r.itens) || []).slice(0, 5).map(it => ({
+        titulo: String(it.titulo || '').slice(0, 120),
+        trecho: String(it.trecho || '').slice(0, 200),
+        url: String(it.url || '').slice(0, 160),
+      })),
+    }));
+  }
+
   // O card mostra "N buscas" — sem isto mostraria "0 buscas ⚠", porque o
   // Gemini não buscou nada: quem buscou foi o Serper.
   function marcarRapido(j, res) {
@@ -7030,6 +7328,7 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
     j._src = 'gemini⚡';
     j.buscas_feitas = feitas.map(r => r.query);
     j._uso = Object.assign({}, j._uso || {}, { queries: feitas.length });
+    j._resultados = compactarResultados(res);   // v24.3: para repetir o caso depois
     return j;
   }
 
@@ -7037,7 +7336,7 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
     if (!modoRapidoLigado()) return null;
     const t0 = Date.now();
     try {
-      const res = await (buscasPre || buscasEmParalelo(planoDeBuscas(ex, tag)));
+      const res = await (buscasPre || buscasEmParalelo(planoDeBuscas(ex, tag), tag === 'M1'));
       const tBusca = Date.now() - t0;
       if (!res || !res.some(r => r && r.itens && r.itens.length)) {
         console.warn('[V4]', tag, 'rápido: busca sem resultado — indo pela busca completa');
@@ -7046,7 +7345,10 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
       const t1 = Date.now();
       const j = await executarIA(MODO_RAPIDO + prompt, user + '\n\n' + formatarResultados(res),
         RAPIDO_TIMEOUT_MS, tag,
-        { semBusca: true, soGemini: true, thinking: tag === 'M2' ? 1024 : 512 });
+        // v24.1: IA levou 6,9s com 512 no CLORO. Sem busca, o julgamento é
+        // sobre trechos já prontos — raciocínio zero no M1, curto no M2.
+        { semBusca: true, soGemini: true, thinking: tag === 'M2' ? 512 : 0 });
+      ancorarNosResultados(j, res, ex);   // v24.3
       marcarRapido(j, res);
       console.log('[V4]', tag, 'rápido · buscas', (res.ms || tBusca) + 'ms (espera',
         tBusca + 'ms) · IA', (Date.now() - t1) + 'ms');
@@ -7058,7 +7360,7 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
   }
 
   async function runMomento1(ex, buscasPre) {
-    const r = await tentarRapido(M1_PROMPT, buildLeadContext(ex), ex, 'M1', buscasPre);
+    const r = await tentarRapido(M1_RAPIDO_PROMPT, buildLeadContext(ex), ex, 'M1', buscasPre);
     if (r) return r;
     return executarIA(M1_PROMPT, buildLeadContext(ex), M1_TIMEOUT_MS, 'M1');
   }
@@ -7067,8 +7369,8 @@ resultados estão no fim da mensagem, em "RESULTADOS DA BUSCA".
     const user = `${buildLeadContext(ex)}
 
 ═══ INVESTIGAÇÃO RÁPIDA (momento 1) — não fechou, aprofunde ═══
-${JSON.stringify(m1, null, 2)}`;
-    const r = await tentarRapido(M2_PROMPT, user, ex, 'M2');
+${semInternos(m1)}`;
+    const r = await tentarRapido(M2_RAPIDO_PROMPT, user, ex, 'M2');
     // "não existe" é o veredito mais caro. Com trechos de busca só, ele não
     // fecha: se a empresa não saiu confirmada, a busca completa confere.
     if (r && r.empresa_existe === 'sim') return r;
@@ -7084,9 +7386,9 @@ ${JSON.stringify(m1, null, 2)}`;
     let ctx = `${buildLeadContext(entry.extracted)}
 
 ═══ MOMENTO 1 ═══
-${JSON.stringify(entry.m1 || {}, null, 2)}`;
+${semInternos(entry.m1 || {})}`;
 
-    if (entry.m2) ctx += `\n\n═══ MOMENTO 2 (aprofundamento) ═══\n${JSON.stringify(entry.m2, null, 2)}`;
+    if (entry.m2) ctx += `\n\n═══ MOMENTO 2 (aprofundamento) ═══\n${semInternos(entry.m2)}`;
 
     if (entry.oficial) {
       const e = entry.oficial;
@@ -7692,7 +7994,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     const ramo = (entry.m2 && entry.m2.ramo_real) || (entry.m1 && entry.m1.ramo_aparente) || null;
     entry.divSegmento = compararSegmento(ramo, ex.segmento);
     entry.emailPorte = checarEmailPorte(ex.emailInfo, ex.faturamentoMin);
-    entry.iniciais = checarIniciais(ex.nomeEmpresa, ex.nomeContato);
+    entry.iniciais = checarIniciais(ex.nomeEmpresa, ex.nomeContato)
+                  || nomeVemDoContato(ex.nomeEmpresa, ex.nomeContato);   // v24.2
     entry.enriq = lerEnriquecimento(ex.enriquecimento);
     return entry;
   }
