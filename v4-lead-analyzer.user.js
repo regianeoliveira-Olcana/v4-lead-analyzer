@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      24.3
-// @description  v24.3 · prompts próprios do modo rápido; URL e CNPJ da IA conferidos contra a busca
+// @version      24.4
+// @description  v24.4 · CNPJ baixado não é ativo; troca pelo CNPJ ativo do mesmo titular
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '24.3';
+  const VERSION = '24.4';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -1280,6 +1280,12 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     }
     if (entry.cnpjConfirmado) {
       L.push(['CNPJ', '<span class="v4-tag-ok">confere com o cadastro do lead</span>']);
+    }
+    // v24.4
+    if (entry.cnpjAnterior) {
+      L.push(['CNPJ anterior', esc(fmtCnpj(entry.cnpjAnterior.cnpj)) + ' · '
+        + esc(String(entry.cnpjAnterior.situacao || '').toLowerCase())
+        + ' <span style="color:#8A8A8A">— trocado pelo ativo no nome do mesmo titular</span>']);
     }
 
     if (entry.marcaNacional) {
@@ -3020,6 +3026,26 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         cor: 'amarelo', titulo: 'Empresa',
         txt: 'CNPJ achado é de outra empresa',
         sub: entry.cnpjErrado.texto,
+        pendente: 'empresa',
+      };
+    }
+
+    // v24.4: caso CONTÁBIL C. A — o CNPJ adotado estava BAIXADO desde 2017 e
+    // o box dizia "existe · CNPJ ativo". O titular reabriu com outro CNPJ
+    // (51.519.568), que a própria investigação achou. Baixado não é ativo;
+    // enquanto o script não troca pelo ativo, o box avisa.
+    const sitOf = String((entry.oficial && entry.oficial.situacao) || '').trim();
+    if (temCnpj && sitOf && !/^ATIVA/i.test(sitOf)) {
+      const atual = String(entry.oficial.cnpj || '').replace(/\D/g, '');
+      const outro = [m.cnpj_descoberto].concat((m.outras_empresas || []).map(e => e && e.cnpj))
+        .map(c => String(c || '').replace(/\D/g, ''))
+        .find(c => c.length === 14 && c !== atual);
+      return {
+        cor: 'amarelo', titulo: 'Empresa',
+        txt: 'CNPJ ' + sitOf.toLowerCase() + ' na Receita',
+        sub: outro
+          ? 'há outro CNPJ ligado a ele (' + fmtCnpj(outro) + ') — peça o atual na abertura'
+          : 'a empresa pode ter reaberto com outro CNPJ — peça o atual na abertura',
         pendente: 'empresa',
       };
     }
@@ -8492,6 +8518,60 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
   // v11.0: renderEnderecavel removida — os 4 boxes ocuparam o lugar.
 
+  // v24.4: situação da Receita diferente de ATIVA (baixada, inapta, suspensa)
+  function cnpjInativo(of) {
+    const s = String((of && of.situacao) || '').trim();
+    return !!s && !/^ATIVA/i.test(s);
+  }
+
+  // A empresa nova tem que ser do lead: o contato é o titular, está no QSA,
+  // ou o nome do lead bate com a razão social / fantasia.
+  function vinculoComLead(emp, entry) {
+    const ex = entry.extracted || {};
+    const nat = lerNatureza(emp, ex.nomeContato);
+    if (nat && nat.contatoEhDono) return true;
+    const q = matchQsa(emp.qsa || [], ex.nomeContato, emp, ex.emailInfo);
+    if (q && (q.confianca === 'alta' || q.confianca === 'media')) return true;
+    return !!nomeBateComEmpresa(ex.nomeEmpresa, emp);
+  }
+
+  // Caso CONTÁBIL C. A: CNPJ adotado BAIXADO desde 2017, e a investigação
+  // achou o ativo (51.519.568) no nome do mesmo titular. O card seguia com
+  // porte, capital e situação da empresa fechada.
+  async function trocarCnpjBaixado(entry) {
+    const of = entry.oficial;
+    if (!cnpjInativo(of) || entry._trocandoCnpj) return false;
+    const atual = String(of.cnpj || '').replace(/\D/g, '');
+    const m = entry.m2 || entry.m1 || {};
+    const cands = [...new Set([m.cnpj_descoberto].concat((m.outras_empresas || []).map(e => e && e.cnpj))
+      .map(c => String(c || '').replace(/\D/g, ''))
+      .filter(c => c.length === 14 && c !== atual))].slice(0, 3);
+    if (!cands.length) return false;
+    entry._trocandoCnpj = true;
+    try {
+      for (const c of cands) {
+        const conf = confrontarCnpj(c, entry.extracted.cnpjParcial);
+        if (conf && !conf.bate) continue;
+        const r = await buscarOficial(c, entry.extracted);
+        const emp = r && r.empresa;
+        if (!emp || cnpjInativo(emp) || !vinculoComLead(emp, entry)) continue;
+        entry.cnpjAnterior = { cnpj: of.cnpj, situacao: of.situacao };
+        entry.oficial = emp;
+        entry.oficialFontes = r.fontes;
+        entry.qsaMatch = r.qsaMatch;
+        entry.parentesco = r.parentesco;
+        entry.cnpjResolvido = emp.cnpj;
+        entry.cnpjConfirmado = conf && conf.bate ? conf : null;
+        console.log('[V4] CNPJ', String(of.situacao).toLowerCase(), 'trocado pelo ativo:',
+          fmtCnpj(atual), '→', fmtCnpj(emp.cnpj));
+        if (entry.card) applyOficial(entry);
+        try { saveEntry(entry); } catch (e) {}
+        return true;
+      }
+    } finally { entry._trocandoCnpj = false; }
+    return false;
+  }
+
   function applyOficial(entry) {
     const { oficial: e, qsaMatch, card } = entry;
     if (!e) return;
@@ -8504,7 +8584,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     // porque essas viriam JULGADAS e ninguém repondera na pressa do leilão.
     // "CNAE 4651602, não confirmado" quem compra sabe ponderar;
     // "13x acima do limite legal" já vem com veredito embutido.
-    const cnpjOk = !entry.cnpjErrado;
+    // v24.4: porte e capital de empresa baixada não dizem nada do negócio de hoje
+    const cnpjOk = !entry.cnpjErrado && !cnpjInativo(e);
     entry.coerenciaPorte = cnpjOk
       ? checarCoerenciaPorte(e.porte, ex.faturamentoMin, e.capital_social, e.abertura) : null;
     entry.alertaCapital = cnpjOk ? checarCapital(e.capital_social, ex.faturamentoMin) : null;
@@ -8593,6 +8674,9 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       // v16.3: recalcula em vez de pintar por fora
       if (entry.m1) { try { renderBoxes(entry); } catch (e) { console.warn('[V4] boxes:', e); } }
     }
+
+    // v24.4: CNPJ fechado → procura o ativo do mesmo titular
+    if (cnpjInativo(e)) setTimeout(() => { trocarCnpjBaixado(entry).catch(() => {}); }, 0);
 
     // v12.0: o bloco visual "📋 Dados oficiais" foi REMOVIDO — repetia CNPJ,
     // CNAE, situação, porte, capital e QSA, que já aparecem em "Dados
@@ -8692,6 +8776,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       }
       // atualiza checks com o resultado mais recente
       mergeM2IntoChecks(entry);
+      // v24.4: o M2 costuma achar o CNPJ ativo de quem fechou e reabriu
+      if (cnpjInativo(entry.oficial)) await trocarCnpjBaixado(entry);
       saveEntry(entry);
       renderActions(entry);
     } catch (e) {
