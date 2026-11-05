@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      24.4
-// @description  v24.4 · CNPJ baixado não é ativo; troca pelo CNPJ ativo do mesmo titular
+// @version      24.5
+// @description  v24.5 · lista da esquerda acompanha o farol; dono de outra empresa não é decisor nesta
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '24.4';
+  const VERSION = '24.5';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -447,10 +447,11 @@ O QUE APROFUNDAR:
    "Nome Completo" quadro societário
    (Casa dos Dados, Econodata, Serasa Experian e Casa Civil indexam isso)
 
-   ⚠️ ACHAR OUTRAS EMPRESAS É SINAL BOM, NÃO RED FLAG.
-   Quem tem CNPJ no próprio nome é dono: tem capital, decide sozinho e conhece
-   o custo de aquisição. Um contato com 2-3 negócios vale MAIS que um contato
-   sem rastro — mesmo que a empresa do lead não seja a que você achou.
+   ⚠️ ACHAR OUTRAS EMPRESAS É INFORMAÇÃO, NÃO PROVA DE CARGO.
+   Ser sócio ou dono de OUTRA empresa não faz a pessoa decidir NESTA. Liste em
+   outras_empresas e diga se ficam em outra cidade — mas decisor_papel e
+   decisor_status são só sobre a empresa do lead. Se a única prova de cargo é
+   uma empresa diferente da do lead, decisor_status = "nao".
 
    Preste atenção em dois padrões:
    • RAZÃO SOCIAL POR INICIAIS — "J N V COMERCIO LTDA" é Jose Nelio Vanço.
@@ -1096,7 +1097,22 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         }
       }
     } catch (e) { console.warn('[V4] autoverificação do farol:', e); }
+
+    // v24.5: a lista da esquerda ficava com a cor do Momento 1. O card é
+    // repintado depois do M2, da Receita e da troca de CNPJ — e a lista só
+    // era redesenhada em alguns desses caminhos. Agora acompanha todos.
+    agendarRail();
 }
+
+  let railAgendado = false;
+  function agendarRail() {
+    if (railAgendado) return;
+    railAgendado = true;
+    setTimeout(() => {
+      railAgendado = false;
+      try { renderRail(); } catch (e) { console.warn('[V4] trilha:', e); }
+    }, 0);
+  }
 
   function fmtCnpj(c) {
     const d = String(c || '').replace(/\D/g, '');
@@ -1357,6 +1373,15 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // do nome do contato ser comum. "ALPATECH" em "ALPATECH INDUSTRIA DE
     // PLASTICOS" identifica a empresa mesmo com o contato chamado Daniel Souza.
     // Palavra de ramo (ODONTOLOGIA, PADARIA) não vale — está em milhares.
+    // v24.5: nome do lead que é só uma sigla curta ("JFC") ficava de fora —
+    // o filtro abaixo pede mais de 3 letras. "JFC VANCO CONSTRUCAO CIVIL" é a
+    // empresa do lead "JFC", não outra empresa do contato.
+    const leadCurto = normalizarTexto(ex.nomeEmpresa || '').replace(/[^a-z0-9 ]/g, ' ').trim();
+    if (/^[a-z0-9]{2,4}$/.test(leadCurto)
+        && new RegExp('(^|[^a-z0-9])' + leadCurto + '([^a-z0-9]|$)').test(normalizarTexto(e.nome || ''))) {
+      return { forca: 'forte', prova: 'nome do lead aparece na razão social' };
+    }
+
     const distEmpresa = partesNome(ex.nomeEmpresa || '')
       .filter(p => p.length > 3 && parteDistintiva(p) && !PALAVRA_DE_RAMO.test(p));
     const nomeEmpresaNaRazao = distEmpresa.length && distEmpresa.some(p => nomeEmp.includes(p));
@@ -3426,7 +3451,22 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         }
       }
 
-      const primeira = oe.aDoLead || oe.lista[0];
+      const IDENTIDADE = /nome do lead|CNPJ bate|mesma raiz/i;
+      const daEmpresa = oe.aDoLead || oe.lista.find(e => IDENTIDADE.test(String((e._prova || {}).prova || '')));
+      const primeira = daEmpresa || oe.lista[0];
+      // v24.5: caso EMPORIO MÉDICO — dona de OUTRA empresa não é decisora
+      // nesta. Só fica verde quando a empresa achada é a do lead: marcada
+      // como tal, mesma raiz de CNPJ, ou o nome do lead na razão social.
+      const ehEstaEmpresa = !!daEmpresa;
+      if (!ehEstaEmpresa) {
+        return {
+          cor: 'amarelo', titulo: 'Decisor',
+          txt: 'sócio de outra empresa',
+          sub: `${esc(primeira.nome)}${primeira.cidade ? ' · ' + esc(primeira.cidade) : ''}`
+            + ' — não prova cargo nesta; pergunte o papel dele aqui',
+          pendente: 'decisor',
+        };
+      }
       const forte = primeira._prova.forca === 'definitiva' || primeira._prova.forca === 'forte';
       const outros = oe.total > 1 ? ` (+${oe.total - 1})` : '';
       return {
@@ -4018,6 +4058,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (!m) return null;
     const ev = String(m.decisor_evidencia || '');
     if (!ev) return null;
+
+    // v24.5: caso EMPORIO MÉDICO — "ROSE QUEIROZ DOS SANTOS - ME é empresa
+    // individual da Rose... Embora não seja a EMPORIO MÉDICO, ela é sócia de
+    // uma empresa própria, o que a qualifica como decisora". Ser dona de OUTRA
+    // empresa não dá cargo nesta. Vale mesmo com fonte "qsa": o QSA é de outra.
+    const OUTRA_EMPRESA = /embora n[ãa]o seja|n[ãa]o (é|seja|e) (a|o) (empresa|mesm[ao]|lead)|(de|em|da) outra empresa|outra empresa (dela|dele|pr[óo]pria)|empresa pr[óo]pria|n[ãa]o (é|seja) (a |o )?\w+ (do|da) lead/i;
+    if (OUTRA_EMPRESA.test(ev)) {
+      return {
+        invalida: true,
+        tipo: 'cargo em outra empresa',
+        texto: 'a evidência é de cargo em OUTRA empresa — ser dono de um negócio não dá cargo neste',
+      };
+    }
 
     const achado = EVIDENCIA_INVALIDA.find(x => x.re.test(ev));
     if (!achado) return null;
@@ -7114,8 +7167,9 @@ decisor_status:
   "nao"        → nada sobre a pessoa
 decisor_papel: o cargo que o resultado mostra, escrito seco ("Sócio-Administrador").
 Sem prova, null.
-Se o contato é sócio ou administrador de OUTRAS empresas, liste em outras_empresas,
-com o CNPJ só se ele aparece no resultado. Se o cadastro trouxe dígitos do CNPJ,
+decisor_papel e decisor_status são sobre ESTA empresa. Ser sócio ou dono de OUTRA
+empresa não é cargo aqui: liste em outras_empresas, com o CNPJ só se ele aparece
+no resultado, e deixe decisor_papel null se não houver prova nesta. Se o cadastro trouxe dígitos do CNPJ,
 compare: a empresa cujo CNPJ começa com eles é a do lead (e_a_do_lead = true).
 
 ═══ REGRAS DURAS ═══
@@ -7167,8 +7221,9 @@ empresa, redes, marketplaces e sobrenome. Use-os para resolver o que ficou abert
   Não estime margem, EBITDA nem lucro — a régua de margem é aplicada no código.
 • FAMÍLIA: contato com o mesmo sobrenome de um sócio no QSA é provável familiar
   (filho, cônjuge, irmão) — empresa_familiar = true. Não é decisor confirmado.
-• EMPRESAS DO CONTATO: liste todas em que ele aparece como sócio. Ter outras
-  empresas é sinal BOM (é dono, decide). Diga se ficam em outra cidade.
+• EMPRESAS DO CONTATO: liste todas em que ele aparece como sócio e diga se
+  ficam em outra cidade. Ser dono de OUTRA empresa não dá cargo NESTA: isso
+  vai em outras_empresas, não em decisor_papel.
 • COERÊNCIA: faturamento × porte, cidade × endereço, nome × domínio do e-mail,
   cargo declarado × cargo real. DDD diferente da UF NÃO é contradição.
 • Se a sua leitura diverge do momento 1, diga por quê no resumo.
