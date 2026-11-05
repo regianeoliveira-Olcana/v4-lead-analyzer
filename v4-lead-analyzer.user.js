@@ -1,8 +1,9 @@
+
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      24.5
-// @description  v24.5 · lista da esquerda acompanha o farol; dono de outra empresa não é decisor nesta
+// @version      24.9
+// @description  v24.9 · dossiê só com pontos de atenção e insights, sem falas prontas
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -35,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '24.5';
+  const VERSION = '24.9';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -552,9 +553,8 @@ Regras:
 • VERMELHO → o segmento nesse porte historicamente não sustenta o investimento
   comercial. O SDR pode discordar com informação nova.
 • Faixa do LeadBroker cruzando dois tiers → traga a pergunta que resolve.
-• Abaixo de R$ 100k/mês não desqualifica: a conversa passa a ser de SABER
-  (diagnóstico parcelável) ou TER (martech ou entregável pontual). Escreva de
-  forma afirmativa, nunca como "lead pequeno demais".
+• Abaixo de R$ 100k/mês não desqualifica: é outro tipo de conversa. Escreva de
+  forma neutra, nunca como "lead pequeno demais".
 
 FATURAMENTO DECLARADO vs. RECEITA — DOIS NÍVEIS:
 
@@ -572,10 +572,9 @@ Se o contexto traz "FATURAMENTO PODE ESTAR FORA DO ICP":
   "Só pra eu dimensionar certo — qual foi o faturamento dos últimos 12 meses?"
 • NÃO trate a classificação como firme; marque "a confirmar na ligação"
 
-Sobre ICP: o ICP core da V4 começa em R$ 100k/mês. Abaixo disso o lead está fora do
-ICP core, MAS segue qualificado para SABER (diagnóstico, parcelável) e TER (martech
-recorrente ou entregável pontual). Diga isso de forma neutra e afirmativa — é outro
-tipo de conversa, não um lead ruim. Nunca escreva "lead pequeno demais" ou similar.
+Sobre ICP: o ICP core da V4 começa em R$ 100k/mês. Abaixo disso o lead segue
+qualificado — é outro tipo de conversa, não um lead ruim. Nunca escreva "lead
+pequeno demais" ou similar.
 
 Nos dois casos, explique sem acusar. Três causas possíveis, todas comuns:
 (a) número arredondado pra cima no formulário, (b) porte desatualizado na Receita,
@@ -663,73 +662,63 @@ Se o subsegmento tem fonte 'estimativa sem fonte', diga explicitamente que a fai
 de margem é estimativa e não tem pesquisa por trás.
 
 DOR DO SEGMENTO:
-Quando o contexto traz "Dor típica do segmento", use como HIPÓTESE a validar,
-nunca como fato. Combine com o que a investigação achou do negócio específico.
+Dor de segmento é HIPÓTESE a confirmar com o cliente, nunca fato. Use o ramo REAL
+investigado (o segmento marcado no formulário costuma estar errado) e combine com
+os SINAIS DOS DADOS do contexto.
+
+TOM — LEIA ANTES DE ESCREVER:
+O dossiê traz PONTOS DE ATENÇÃO e INSIGHTS para o SDR — não roteiro. Como usar
+cada ponto na ligação é ensinado no treinamento; não escreva falas prontas,
+perguntas de SPICED nem frase de vender a reunião.
+• Tudo que não está confirmado nos dados é HIPÓTESE e se escreve como hipótese
+  ("pode", "provável", "a confirmar"). Cliente que ouve diagnóstico pronto acha
+  a V4 prepotente — já aconteceu. O SDR confirma com o cliente antes de implicar.
+• Decisor: mesmo com sócio único ou titular, é SEMPRE a confirmar — pode haver
+  um responsável no organograma que toma a decisão. Nunca escreva "decide sozinho".
+• Proibido: "o problema de vocês é", "vocês estão perdendo", "com certeza",
+  "claramente".
+• Não mencione produto, pilar (SABER/TER/EXECUTAR) nem preço.
+• Curto e sem repetir: cada ponto aparece uma vez, na seção certa.
 
 FORMATO DE SAÍDA:
 
 ═══ [EMPRESA] ═══
-[FAROL: GO / CAUTION / STOP — copie o que o contexto trouxe]
-Faturamento declarado: [X]  ·  Tier: [X]
-Ramo real (investigado): [X]  ·  fonte: [CNAE da Receita / investigação web]
+FAROL: [copie do contexto] — [motivo em uma linha]
 
-[SE o contexto trouxer "SINAIS DE PORTE MAIOR QUE O DECLARADO", abra com isto,
- antes de tudo — é o que muda a decisão:]
-⚡ PORTE PODE SER MAIOR QUE O DECLARADO
-   [liste os sinais que vieram no contexto, separados por · ]
-   O declarado é [X]. Confirmar o faturamento real é a primeira tarefa.
+[SE o contexto trouxer "SINAIS DE PORTE MAIOR QUE O DECLARADO", abra com isto:]
+⚡ PORTE PODE SER MAIOR QUE O DECLARADO — [os sinais do contexto, separados por · ]
 
-OS 4 BOXES
-[✅/⚠️/🚨] Concorrente — [o que foi apurado]
-[✅/⚠️/❌] Empresa — [existe? quantas fontes? quais?]
-[✅/⚠️/❌] Decisor — [papel + como foi confirmado, ou o que falta]
-[✅/⚠️/❌] Margem — [bucket · segmento] · ICP a partir de [corte do bucket]/mês
+QUEM É  (só o que foi confirmado nos dados, até 4 linhas)
+[contato · papel achado, ou "papel a confirmar" · ramo REAL investigado · cidade]
+[CNPJ · situação · abertura · sócios — e as outras empresas do contato, se houver]
+[faturamento declarado · canal de origem]
 
-⚠️ NÃO invente percentual de margem nem estime lucro. Use o bucket que veio no
-contexto (alta >50% · média 30-50% · baixa <30%) e o corte de ICP. Nada de
-"lucro bruto ≈ R$ X".
+⚠️ CONTRADIÇÕES
+• [declarado X vs achado Y — sem acusar; a causa comum mais provável]
+[NÃO invente percentual de margem nem estime lucro: use só o bucket do contexto.]
 
-DADOS OFICIAIS (se houver CNPJ)
-CNPJ · Razão social · Situação · Abertura · Capital · CNAE
-QSA: [sócios]
-[se o contato bate no QSA: informe a CONFIANÇA e a BASE do match, não só "é sócio".
- Ex: "confiança alta — 'Eugenio Leite' está contido em 'Bruno Eugenio Leite da Silva',
- e a empresa é sociedade individual (um titular só)".
- Se a confiança for média/baixa ou ambígua, diga que precisa confirmar na ligação.]
-[se divergência de nome fantasia × razão social: normal no Brasil, não invalida]
-[SE o contexto trouxer que a razão social cita atividade fora do CNAE, diga as DUAS:
- "CNAE registra [X], mas a razão social cita [Y] — a empresa faz mais de uma coisa".
- Isso é informação pro SDR, não erro de cadastro.]
+💰 ONDE O DINHEIRO PODE ESTAR FICANDO NA MESA  (hipóteses do segmento)
+[Leia o bowtie inteiro. Muitas vezes o dinheiro está na base, não em lead novo.
+ Use o ramo REAL e os sinais do contexto; nada de dor genérica de "marketing".]
+Conquistar → [como esse segmento costuma atrair cliente e onde isso trava]
+Fechar     → [onde esse segmento costuma perder venda que já estava perto]
+Base       → [recompra, expansão, renovação, cliente parado que dá para recuperar]
 
-CONTATO
-Declarado: "[nome]"  ·  cargo declarado: "[cargo]"
-Papel real: [X ou "não comprovado"]
-Vínculo familiar: [sobrenome coincidente no QSA, ou "não identificado"]
-E-mail: [X]  ·  domínio: [corporativo/genérico]
-[se sobrenome saiu do e-mail: sobrenome extraído do e-mail: X]
+🎯 GARGALO PROVÁVEL  (Teoria das Restrições: a etapa que limita todo o resto)
+[uma hipótese principal, em uma ou duas frases, apoiada nos sinais do contexto]
+Alternativo: [uma linha]
+Sinal que diferencia: [o que, na conversa, aponta para um ou para o outro]
 
-ROTEAMENTO DE PILAR
-→ Recomendado: [SABER / TER / EXECUTAR]
-   Por quê: [justificativa ligada ao bucket de margem e ao corte de ICP]
-→ Descartado: [pilar] — [motivo]
-→ Caminho de upsell: [se aplicável]
-[SE houver sinais de porte maior que o declarado, escreva que o roteamento pode
- mudar depois de confirmar o faturamento — não feche a porta do EXECUTAR.]
+IMPLICAÇÕES  (se o gargalo se confirmar)
+• [consequência no caixa, na margem ou no risco — sem número inventado]
+• [mais uma ou duas]
 
-⚠️ CONTRADIÇÕES / RED FLAGS
-• [declarado X vs achado Y]
+⚠ PONTOS DE ATENÇÃO
+• [quem mais pode decidir, o que confirmar primeiro, o que evitar]
+[SE o CNPJ do cadastro não foi confirmado, o primeiro ponto é confirmar o CNPJ
+ (ex.: "me confirma o CNPJ?") — com ele se resolve ramo real, porte e sócios.]
 
-SDR — QUALIFICAÇÃO ASSERTIVA
-↳ Dor provável (baseada no ramo REAL): [específica]
-↳ Abrir a conversa por: [ângulo — martech? diagnóstico? tráfego?]
-↳ [SE o CNPJ do cadastro não foi confirmado, a PRIMEIRA pergunta é o CNPJ —
-   com ele todo o resto se resolve: ramo real, porte, sócios, tempo de casa.
-   "Pra eu puxar o histórico de vocês aqui, me confirma o CNPJ?"]
-↳ Confirmar na ligação:
-   1. [pergunta que valida o papel do contato]
-   2. [pergunta que valida faturamento/margem]
-   3. [pergunta que valida a dor do pilar recomendado]
-↳ Alçada esperada: [nível]
+SPICED: S [✓ / a confirmar] · P [hipótese] · I [a dimensionar] · CE [sinal, ou nenhum nos dados] · D [quem — a confirmar]
 ↳ Se for concorrente: NÃO ESCALAR.
 
 Sem CNPJ é normal no leilão — não trate como falha.
@@ -3585,28 +3574,38 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const flags = [].concat(m.contradicoes || [], m.red_flags || []).map(String).join(' | ');
     const porFlag = !!cnae && /cnae[^|]*(n[ãa]o (reflete|corresponde|condiz)|diverge|difere|desatualizad)/i.test(flags);
 
+    // v24.7: o segmento que vale é o que a INVESTIGAÇÃO achou — o contato marca
+    // errado no formulário e o CNAE costuma estar desatualizado. Quando CNAE e
+    // investigação divergem, a margem sai da atividade real; o CNAE vira nota.
+    // Só fica em aberto se a própria investigação diz que não tem certeza.
+    let ramoReal = null, notaCnae = null;
     if (porBucket || porFlag) {
       entry.margemDivergente = {
         cnae: bCnae, real: bIA,
         via: porBucket ? 'bucket' : 'a própria investigação apontou',
       };
-      return {
-        cor: 'amarelo', titulo: 'Margem',
-        txt: porBucket ? `${bCnae.rot} (CNAE) vs ${bIA.rot} (real)` : 'CNAE não reflete a atividade',
-        sub: porBucket
-          ? `CNAE diz "${bCnae.nome}", investigação diz "${bIA.nome}"`
-          : 'a investigação achou atividade diferente do registro — confirmar',
-        motivo: bCnae && bIA
-          ? `CNAE indica ${bCnae.nome}, investigação indica ${bIA.nome}`
-          : 'CNAE desatualizado — a atividade real é outra',
-        pendente: 'margem',
-      };
+      const incerto = entry.m2 && /baixa/i.test(String(entry.m2.ramo_confianca || ''));
+      if (!bIA || incerto) {
+        return {
+          cor: 'amarelo', titulo: 'Margem',
+          txt: porBucket ? `${bCnae.rot} (CNAE) vs ${bIA.rot} (real)` : 'CNAE não reflete a atividade',
+          sub: porBucket
+            ? `CNAE diz "${bCnae.nome}", investigação diz "${bIA.nome}" — sem certeza da atividade real`
+            : 'a investigação achou atividade diferente do registro — confirmar',
+          motivo: bCnae && bIA
+            ? `CNAE indica ${bCnae.nome}, investigação indica ${bIA.nome}`
+            : 'CNAE desatualizado — a atividade real é outra',
+          pendente: 'margem',
+        };
+      }
+      ramoReal = ramoIA;
+      notaCnae = bCnae ? `CNAE registra ${bCnae.nome} (${bCnae.rot})` : 'CNAE registra outra atividade';
     }
 
-    const ramo = cnae || ramoIA;
-    entry.ramoFonte = cnae ? 'CNAE' : (ramoIA ? 'investigação' : null);
+    const ramo = ramoReal || cnae || ramoIA;
+    entry.ramoFonte = ramoReal ? 'investigação' : (cnae ? 'CNAE' : (ramoIA ? 'investigação' : null));
 
-    const ramoVerif = !!cnae || (!!ramoIA && !entry.marcaNacional);
+    const ramoVerif = !!ramoReal || !!cnae || (!!ramoIA && !entry.marcaNacional);
     const cp = entry.coerenciaPorte;
     const fatVerif = !!(cp && cp.checou && cp.coerente === true);
     const fatContradiz = !!(cp && cp.checou && cp.coerente === false);
@@ -3631,6 +3630,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         sub = r.curto || r.motivo;
       }
     }
+
+    // v24.7: a divergência com o CNAE vira nota — informação pro SDR
+    if (notaCnae) sub = [sub, notaCnae].filter(Boolean).join(' · ');
 
     return {
       cor: r.cor, titulo: 'Margem',
@@ -7459,6 +7461,73 @@ ${semInternos(m1)}`;
     return executarIA(M2_PROMPT, user, M2_TIMEOUT_MS, 'M2');
   }
 
+  // v24.7: pontos de atenção para o SPICED, tirados dos dados — não da IA.
+  // O dossiê vai para o SDR qualificar o lead; aqui entram os fatos que mudam
+  // a conversa. O segmento que vale é o investigado, nunca o do formulário.
+  function sinaisSpiced(entry) {
+    const ex = entry.extracted || {};
+    const m = entry.m2 || entry.m1 || {};
+    const of = entry.oficial;
+    const S = [], P = [], C = [], E = [];   // S · P · CE · D
+    const ramoReal = (entry.m2 && entry.m2.ramo_real) || m.ramo_aparente || null;
+    // o M2 pode não repetir o que o M1 já achou — vale o que qualquer um achou
+    const doisM = k => (entry.m2 && entry.m2[k]) || (entry.m1 && entry.m1[k]) || null;
+    const site = doisM('site'), insta = doisM('instagram'), func = doisM('funcionarios_linkedin');
+
+    if (ramoReal) S.push(`ramo real (investigado): ${ramoReal}`);
+    if (ex.segmento && ramoReal) S.push(`no formulário marcou "${ex.segmento}" — vale o investigado`);
+    if (of && of.abertura) {
+      const meses = idadeEmpresaMeses(of.abertura);
+      if (meses != null) S.push(`CNPJ com ${meses < 24 ? meses + ' meses' : Math.floor(meses / 12) + ' anos'}`);
+      if (meses != null && meses < 24) C.push('empresa com menos de 2 anos — fase de estruturar a aquisição');
+    }
+    if (func) S.push(`funcionários no LinkedIn: ${func}`);
+    if (entry.coerenciaPorte && entry.coerenciaPorte.coerente === false) {
+      S.push('faturamento declarado não bate com o porte na Receita — confirmar');
+    }
+    if (entry.porteMaior) S.push('sinais de porte MAIOR que o declarado');
+    if (entry.cnpjAnterior) {
+      S.push('fechou um CNPJ e reabriu com outro');
+      C.push('reabriu a empresa com outro CNPJ — entender o que mudou');
+    }
+    // v24.8: caso ARMAZÉM — o contato é sócio de várias empresas. Pode ser um
+    // grupo que atende o mesmo cliente; é para CONFIRMAR, não afirmar.
+    const outras = ((entry.m2 && entry.m2.outras_empresas) || (entry.m1 && entry.m1.outras_empresas) || [])
+      .filter(e => e && e.nome);
+    if (outras.length >= 2) {
+      S.push(`contato aparece em ${outras.length} empresas (${outras.slice(0, 3).map(e => e.nome).join('; ')})`
+        + ' — confirmar se são complementares e atendem o mesmo cliente');
+    }
+
+    if (!site && insta) P.push('nenhum site achado — presença só no Instagram');
+    else if (!site && !insta) P.push('quase sem presença online achada');
+    if (entry.margemDivergente && entry.margemDivergente.real) P.push('CNAE desatualizado — a atividade mudou');
+
+    const vagas = (entry.m2 && entry.m2.vagas_abertas) || [];
+    if (vagas.length) {
+      const txt = vagas.slice(0, 3)
+        .map(v => typeof v === 'string' ? v : (v && (v.titulo || v.cargo)) || '').filter(Boolean).join(', ');
+      if (txt) {
+        C.push(`vagas abertas: ${txt}`);
+        if (/vend|comercial|sdr|closer|marketing/i.test(txt)) P.push('contratando para vendas/marketing — dor de geração de demanda');
+      }
+    }
+
+    const bd = entry.boxes && entry.boxes.decisor;
+    if (bd) E.push(`box Decisor: ${bd.txt}${bd.sub ? ' — ' + bd.sub : ''}`);
+    if (of && Array.isArray(of.qsa) && of.qsa.length) {
+      E.push('sócios na Receita: ' + of.qsa.slice(0, 4).map(q => q.nome).join(', '));
+    }
+    const al = alcadaDoPorte(ex.faturamentoMin);
+    if (al && ex.faturamentoMin) E.push(`alçada esperada pelo porte: ${al.rot}`);
+    if (entry.parentesco) E.push(`sobrenome em comum com sócio (${entry.parentesco.sobrenomes}) — possível familiar`);
+
+    const linha = (k, arr) => arr.length ? `${k}: ${arr.join(' · ')}` : `${k}: (nada nos dados)`;
+    return ['═══ SINAIS DOS DADOS (fatos — base para gargalo e pontos de atenção) ═══',
+      linha('S · situação', S), linha('P · dor', P), linha('CE · evento crítico', C),
+      linha('D · decisão (sempre confirmar)', E)].join('\n');
+  }
+
   async function runMomento3(entry) {
     // registra o consumo do M3 (só OpenAI, sem busca)
     const ok = GM_getValue('v4_openai_key', '');
@@ -7604,11 +7673,9 @@ percentual de margem nem estimativa de lucro.`;
       }
     }
 
-    // corte de ICP do bucket — o número que orienta o roteamento de pilar
-    if (entry.matriz && entry.matriz.marg) {
-      const c = corteICP(entry.matriz.marg.bucket);
-      if (c) ctx += `\n\nCORTE DE ICP: margem ${entry.matriz.marg.rot} sustenta EXECUTAR a partir de ${c.texto}/mês.`;
-    }
+    // v24.8: o SDR qualifica com SPICED e não precisa saber o pilar — o bloco
+    // de pilares saiu. Os sinais dos dados alimentam gargalo e pontos de atenção.
+    ctx += '\n\n' + sinaisSpiced(entry);
 
     // sinais de porte maior que o declarado — muda a decisão de lance e de pilar
     if (entry.porteMaior) {
