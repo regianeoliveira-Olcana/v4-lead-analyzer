@@ -1,9 +1,8 @@
-
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      24.9
-// @description  v24.9 · dossiê só com pontos de atenção e insights, sem falas prontas
+// @version      25.0
+// @description  v25.0 · dossiê visual e enxuto; faturamento muito acima do porte segura a margem; iniciais no nome
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +35,7 @@
 
   function init() {
 
-  const VERSION = '24.9';
+  const VERSION = '25.0';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -561,8 +560,7 @@ FATURAMENTO DECLARADO vs. RECEITA — DOIS NÍVEIS:
 Se o contexto traz "RESSALVA DE FATURAMENTO (não bloqueante)":
 • O declarado não bate com o porte, MAS mesmo um valor bem menor segue dentro do ICP
 • Trate como ponto de confirmação, NÃO como problema — o lead continua bom
-• Uma linha no dossiê basta: "confirmar faturamento real; porte na Receita sugere
-  valor menor, provavelmente porte desatualizado (empresa cresceu e não reenquadrou)"
+• Uma linha no dossiê basta: "confirmar faturamento real"
 • Mantenha a leitura da matriz, marcando que depende de confirmar o faturamento
 
 Se o contexto traz "FATURAMENTO PODE ESTAR FORA DO ICP":
@@ -576,9 +574,9 @@ Sobre ICP: o ICP core da V4 começa em R$ 100k/mês. Abaixo disso o lead segue
 qualificado — é outro tipo de conversa, não um lead ruim. Nunca escreva "lead
 pequeno demais" ou similar.
 
-Nos dois casos, explique sem acusar. Três causas possíveis, todas comuns:
-(a) número arredondado pra cima no formulário, (b) porte desatualizado na Receita,
-(c) o contato citou o faturamento do grupo, não daquele CNPJ.
+Nos dois casos, sem acusar. Só cite uma causa se os dados apoiarem — por exemplo,
+contato em várias empresas → pode ser o faturamento somado do grupo. Sem base nos
+dados, não especule: basta "confirmar o faturamento real".
 
 Referência dos tetos: MEI R$ 81k/ano · Microempresa R$ 360k/ano · EPP R$ 4,8M/ano.
 
@@ -670,6 +668,9 @@ TOM — LEIA ANTES DE ESCREVER:
 O dossiê traz PONTOS DE ATENÇÃO e INSIGHTS para o SDR — não roteiro. Como usar
 cada ponto na ligação é ensinado no treinamento; não escreva falas prontas,
 perguntas de SPICED nem frase de vender a reunião.
+• MENOS É MAIS: cada linha tem que falar DESTE lead. Se a frase serviria para
+  qualquer lead, ela não entra. Nada de especulação genérica ("pode ser o
+  faturamento do grupo") sem base nos dados.
 • Tudo que não está confirmado nos dados é HIPÓTESE e se escreve como hipótese
   ("pode", "provável", "a confirmar"). Cliente que ouve diagnóstico pronto acha
   a V4 prepotente — já aconteceu. O SDR confirma com o cliente antes de implicar.
@@ -677,48 +678,70 @@ perguntas de SPICED nem frase de vender a reunião.
   um responsável no organograma que toma a decisão. Nunca escreva "decide sozinho".
 • Proibido: "o problema de vocês é", "vocês estão perdendo", "com certeza",
   "claramente".
-• Não mencione produto, pilar (SABER/TER/EXECUTAR) nem preço.
-• Curto e sem repetir: cada ponto aparece uma vez, na seção certa.
+• Não mencione produto, pilar (SABER/TER/EXECUTAR) nem preço — nem solução.
+• NÃO invente percentual de margem nem estime lucro: use só o bucket do contexto.
+• A EMPRESA DO LEAD é a do bloco "EMPRESA ADOTADA PELO CARD". Empresa com outro
+  CNPJ que a investigação achou só pelo nome é POSSÍVEL HOMÔNIMO — não use os
+  sócios dela para dizer quem decide. O box Decisor do contexto prevalece.
+• "PORTE PODE SER MAIOR" só existe se o contexto trouxer o bloco "SINAIS DE
+  PORTE MAIOR QUE O DECLARADO". A declaração do contato NUNCA é indício de porte
+  maior.
 
-FORMATO DE SAÍDA:
+FORMATO DE SAÍDA — VISUAL, PARA BATER O OLHO:
+[Linhas curtas. Use os ícones e símbolos exatamente assim:
+ ✖ contradição (declarado ➜ achado) · ⭐ hipótese principal · ⚠ dor da etapa ·
+ ➜ sequência ou conclusão · ✔ sinal observável. Nenhuma seção passa de 5 itens.]
 
 ═══ [EMPRESA] ═══
-FAROL: [copie do contexto] — [motivo em uma linha]
+[🟢/🟡/🔴] [FAROL do contexto]  ·  [motivo em poucas palavras]
 
-[SE o contexto trouxer "SINAIS DE PORTE MAIOR QUE O DECLARADO", abra com isto:]
-⚡ PORTE PODE SER MAIOR QUE O DECLARADO — [os sinais do contexto, separados por · ]
+[SÓ SE o contexto trouxer "SINAIS DE PORTE MAIOR QUE O DECLARADO":]
+⚡ PORTE PODE SER MAIOR  ·  [os sinais do contexto, separados por · ]
 
-QUEM É  (só o que foi confirmado nos dados, até 4 linhas)
-[contato · papel achado, ou "papel a confirmar" · ramo REAL investigado · cidade]
-[CNPJ · situação · abertura · sócios — e as outras empresas do contato, se houver]
-[faturamento declarado · canal de origem]
+👤 QUEM É
+  [contato · papel achado, ou "papel a confirmar"]
+  [ramo REAL investigado · cidade]
+  [CNPJ adotado · situação · desde quando · porte]
+  [💵 faturamento declarado · 📲 canal · site/@ se houver]
 
 ⚠️ CONTRADIÇÕES
-• [declarado X vs achado Y — sem acusar; a causa comum mais provável]
-[NÃO invente percentual de margem nem estime lucro: use só o bucket do contexto.]
+  ✖ [declarado] ➜ [achado]
 
-💰 ONDE O DINHEIRO PODE ESTAR FICANDO NA MESA  (hipóteses do segmento)
-[Leia o bowtie inteiro. Muitas vezes o dinheiro está na base, não em lead novo.
- Use o ramo REAL e os sinais do contexto; nada de dor genérica de "marketing".]
-Conquistar → [como esse segmento costuma atrair cliente e onde isso trava]
-Fechar     → [onde esse segmento costuma perder venda que já estava perto]
-Base       → [recompra, expansão, renovação, cliente parado que dá para recuperar]
+💰 DINHEIRO NA MESA  (hipóteses)
+[Leia o bowtie inteiro: muitas vezes o dinheiro está na base, não em lead novo.
+ Use o ramo REAL e os sinais do contexto. Marque ⭐ na etapa do gargalo.]
 
-🎯 GARGALO PROVÁVEL  (Teoria das Restrições: a etapa que limita todo o resto)
-[uma hipótese principal, em uma ou duas frases, apoiada nos sinais do contexto]
-Alternativo: [uma linha]
-Sinal que diferencia: [o que, na conversa, aponta para um ou para o outro]
+  CONQUISTAR  → [como esse segmento atrai cliente, em poucas palavras]
+              ⚠ [onde trava]
 
-IMPLICAÇÕES  (se o gargalo se confirmar)
-• [consequência no caixa, na margem ou no risco — sem número inventado]
-• [mais uma ou duas]
+  FECHAR      → [onde esse segmento perde venda quase feita]
+              ⚠ [onde trava]
 
-⚠ PONTOS DE ATENÇÃO
-• [quem mais pode decidir, o que confirmar primeiro, o que evitar]
-[SE o CNPJ do cadastro não foi confirmado, o primeiro ponto é confirmar o CNPJ
- (ex.: "me confirma o CNPJ?") — com ele se resolve ramo real, porte e sócios.]
+  BASE        → [recompra, expansão, renovação ou recuperação deste segmento]
+              [sequência com ➜ quando houver, ex.: compra A ➜ volta para B]
+              ⚠ [onde trava]
 
-SPICED: S [✓ / a confirmar] · P [hipótese] · I [a dimensionar] · CE [sinal, ou nenhum nos dados] · D [quem — a confirmar]
+🎯 GARGALO PROVÁVEL
+
+  ⭐ [ETAPA] — [hipótese em uma linha]
+     alt.: [ETAPA] — [hipótese alternativa em uma linha]
+
+  🔎 COMO DESCOBRIR
+     ✔ [sinal observável] ➜ [ETAPA]
+     ✔ [sinal observável] ➜ [ETAPA]
+
+📉 SE CONFIRMAR
+  • [causa] ➜ [consequência no caixa, na margem ou no risco — sem número inventado]
+
+🚩 PONTOS DE ATENÇÃO
+  • [o que confirmar primeiro, quem mais pode decidir, o que evitar]
+  [SE o contexto trouxer "FATURAMENTO PODE ESTAR FORA DO ICP", este é o
+   primeiro ponto: confirmar o faturamento real antes de tudo.]
+  [SE o CNPJ do cadastro não foi confirmado: confirmar o CNPJ
+   (ex.: "me confirma o CNPJ?") — com ele se resolve ramo real, porte e sócios.]
+  [SÓ SE os SINAIS DOS DADOS trouxerem evento crítico:
+   ⏱ possível evento crítico: [o sinal] ➜ confirmar]
+
 ↳ Se for concorrente: NÃO ESCALAR.
 
 Sem CNPJ é normal no leilão — não trate como falha.
@@ -855,6 +878,13 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         out.nota = 'o teto de ME/EPP é ANUAL e o porte é o do registro inicial — empresa recém-aberta '
                  + 'não teve exercício fiscal pra reenquadrar. Isso NÃO indica faturamento inflado. '
                  + 'O que vale confirmar: se o faturamento declarado é realizado ou projetado';
+      } else if (razao > 5) {
+        // v25.0: caso MV ESTÉTICA AUTOMOTIVA — declarou R$ 1M/mês, microempresa
+        // na Receita: 33x o teto. "Cair um degrau" supõe arredondamento; 5x ou
+        // mais não é arredondamento. O faturamento real pode estar fora do ICP.
+        out.severidade = 'risco_icp';
+        out.nota = `declarado ${razao.toFixed(0)}x acima do teto do porte — não é arredondamento. `
+                 + 'O faturamento real pode estar fora do ICP: confirmar antes de tudo';
       } else if (fatMensalMin >= ICP_CONFORTAVEL) {
         // faixa alta: mesmo caindo um degrau continua ICP → só ressalva
         out.severidade = 'ressalva';
@@ -864,8 +894,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         // faixa baixa + porte sugere ainda menor → pode sair do ICP
         out.severidade = 'risco_icp';
         out.nota = `porte registrado sugere faturamento abaixo de R$ ${fmtK(ICP_CORE)}/mês — `
-                 + 'provavelmente FORA do ICP core. Não descarta o lead: segue qualificado '
-                 + 'para SABER ou TER. Confirmar o faturamento antes de dimensionar a proposta';
+                 + 'provavelmente FORA do ICP core. Não descarta o lead: '
+                 + 'confirmar o faturamento antes de dimensionar';
       } else {
         out.severidade = 'ressalva';
         out.nota = 'confirmar faturamento real na ligação';
@@ -1751,6 +1781,25 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (!porIniciais || !porPedaco) return null;
     return {
       texto: `"${nomeEmpresa}" vem do nome de ${nomeContato} — iniciais e começo do sobrenome`,
+      composto: true,
+    };
+  }
+
+  // v25.0: caso MV ESTÉTICA AUTOMOTIVA — contato Marcos Vinicius. O nome da
+  // empresa começa com as iniciais dele; o resto é o ramo. As outras checagens
+  // pedem o nome inteiro feito do contato e não pegavam este caso.
+  function iniciaisNoNome(nomeEmpresa, nomeContato) {
+    if (!nomeEmpresa || !nomeContato) return null;
+    const primeiro = normalizarTexto(nomeEmpresa).replace(/[^a-z0-9\s&]/g, ' ').trim().split(/\s+/)[0] || '';
+    if (!/^[a-z]{2,3}$/.test(primeiro)) return null;
+    if (/^(de|da|do|em|os|as|um|uma|e|a|o|me|sa|ltd)$/.test(primeiro)) return null;
+    const partes = partesNome(nomeContato).filter(p => p.length > 1);
+    if (partes.length < 2) return null;
+    const ini = partes.map(p => p[0]).join('');
+    const candidatas = new Set([ini.slice(0, 2), ini.slice(0, 3), ini[0] + ini[ini.length - 1]]);
+    if (!candidatas.has(primeiro)) return null;
+    return {
+      texto: `"${primeiro.toUpperCase()}" no começo de "${nomeEmpresa}" = iniciais de ${nomeContato}`,
       composto: true,
     };
   }
@@ -3610,7 +3659,12 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const fatVerif = !!(cp && cp.checou && cp.coerente === true);
     const fatContradiz = !!(cp && cp.checou && cp.coerente === false);
 
-    const r = cruzarMatriz(ramo, ex.faturamentoMin, ramoVerif, fatVerif, fatContradiz);
+    let r = cruzarMatriz(ramo, ex.faturamentoMin, ramoVerif, fatVerif, fatContradiz);
+    // v25.0: faturamento muito acima do porte (ex.: 33x) não deixa a margem verde
+    if (cp && cp.severidade === 'risco_icp' && r.cor === 'verde') {
+      r = Object.assign({}, r, { cor: 'amarelo', curto: 'faturamento pode estar fora do ICP',
+        motivo: cp.alerta || 'faturamento declarado muito acima do porte na Receita' });
+    }
     entry.matriz = r;
 
     // v16.6: primeira linha = o dado seco. Segunda = o corte de ICP do bucket,
@@ -3677,6 +3731,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     { re: /sociedade de cr[ée]dito|\bSCD\b|fintech|institui[çc][ãa]o de pagamento|correspondente banc[áa]rio|factoring|securitizadora|intermedia[çc][ãa]o (financeira|n[ãa]o.?monet[áa]ria)|cr[ée]dito direto|\bBaaS\b|meios? de pagamento|adquirente|subadquirente/i, b: 'alta', nome: 'serviços financeiros' },
     { re: /consultori|assessori(a|as)? (empresarial|comercial|financeira|de gest)|advocac|advogad|advocat[íi]ci|jur[íi]dic|contabil|contador|atividades de contabilidade|gest[ãa]o empresarial/i, b: 'alta', nome: 'serviços profissionais' },
     { re: /cl[íi]nic|consult[óo]rio|m[ée]dic|odontolog|dentist|fisioterap|psicolog|nutric|dermatolog|cirurgia pl[áa]stic|cirurgi[ãa]o pl[áa]stic|veterinari|atividade m[ée]dica|laborat[óo]rio (cl[íi]nic|de an[áa]lises)|complementa[çc][ãa]o diagn/i, b: 'alta', nome: 'clínica / saúde' },
+    // v25.0: caso MV ESTÉTICA AUTOMOTIVA — "estética" casava com a estética de
+    // beleza (alta). Estética automotiva é serviço de mão de obra e produto: média.
+    // Tem que vir ANTES da linha da estética.
+    { re: /est[ée]tica automotiv|est[ée]tica (de |veicular|de ve[íi]cul)|lava.?jato|lava.?r[áa]pido|polimento (de )?(ve[íi]cul|automot|carro)|vitrifica[çc][ãa]o|insulfilm|envelopament|martelinho/i, b: 'media', nome: 'estética automotiva' },
     { re: /est[ée]tic|harmoniza|botox|preenchim|injet[áa]v|laser|depila|micropigment/i, b: 'alta', nome: 'estética' },
     { re: /software|saas|sistema de gest|erp\b|plataforma|aplicativo|tecnolog|desenvolvimento (de|e licenciamento de) programas|f[áa]brica de software|infoproduto|curso online|neg[óo]cio digital|portais? provedores?|consultoria em tecnologia|provedor de internet|telecomunica[çc][õo]es|scm\b|servi[çc]os de comunica[çc][ãa]o multim[íi]dia|esports?|esportes eletr[ôo]nicos/i, b: 'alta', nome: 'software / digital' },
     { re: /arquitetur|design|engenharia consultiv|per[íi]ci|auditori|corretora de seguro|seguros/i, b: 'alta', nome: 'serviços técnicos especializados' },
@@ -7482,6 +7540,7 @@ ${semInternos(m1)}`;
       if (meses != null && meses < 24) C.push('empresa com menos de 2 anos — fase de estruturar a aquisição');
     }
     if (func) S.push(`funcionários no LinkedIn: ${func}`);
+    if (entry.iniciais && entry.iniciais.texto) S.push(`${entry.iniciais.texto} — indício de que a empresa é dele`);
     if (entry.coerenciaPorte && entry.coerenciaPorte.coerente === false) {
       S.push('faturamento declarado não bate com o porte na Receita — confirmar');
     }
@@ -7526,6 +7585,17 @@ ${semInternos(m1)}`;
     return ['═══ SINAIS DOS DADOS (fatos — base para gargalo e pontos de atenção) ═══',
       linha('S · situação', S), linha('P · dor', P), linha('CE · evento crítico', C),
       linha('D · decisão (sempre confirmar)', E)].join('\n');
+  }
+
+  // v25.0: caso MV ESTÉTICA — o dossiê abriu com "PORTE PODE SER MAIOR" a partir
+  // da declaração do contato; o card não tinha nenhum sinal disso. O prompt já
+  // dizia "só se o contexto trouxer" — aqui o código garante.
+  function limparDossie(texto, entry) {
+    let t = String(texto || '');
+    if (!entry || !entry.porteMaior) {
+      t = t.split('\n').filter(l => !/PORTE PODE SER MAIOR/i.test(l)).join('\n');
+    }
+    return t.replace(/\n{3,}/g, '\n\n');
   }
 
   async function runMomento3(entry) {
@@ -7580,6 +7650,12 @@ no dia a dia. Trate como acesso provável ao decisor, não como decisor confirma
           : `\n\n↯ RESSALVA DE FATURAMENTO (não bloqueante)\n${cp.alerta}\n${cp.nota}`;
       }
       if (entry.alertaCapital) ctx += `\n↯ ${entry.alertaCapital}`;
+      // v25.0: caso MV ESTÉTICA — o dossiê usou o CNPJ de uma homônima que o M2
+      // achou pelo nome, e os sócios dela para dizer que o contato não decide.
+      ctx += `\n\n═══ EMPRESA ADOTADA PELO CARD (esta é a empresa do lead) ═══\n`
+        + `CNPJ ${fmtCnpj(e.cnpj)} · ${e.razao_social || ''}`
+        + `${e.situacao ? ' · ' + e.situacao : ''}${e.porte ? ' · ' + e.porte : ''}\n`
+        + 'Empresa com outro CNPJ citada pela investigação, achada só pelo nome, é possível homônimo.';
     } else {
       ctx += `\n\nDados oficiais: sem CNPJ resolvido (normal no leilão). Use a investigação web.`;
     }
@@ -7711,7 +7787,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       if (entry.enriq.hipotetico) ctx += ' — texto majoritariamente hipotético, trate com reserva.';
     }
 
-    const { texto, uso } = normalizarResposta(await callOpenAI(M3_PROMPT, ctx, ok, M3_TIMEOUT_MS));
+    const { texto: bruto, uso } = normalizarResposta(await callOpenAI(M3_PROMPT, ctx, ok, M3_TIMEOUT_MS));
+    const texto = limparDossie(bruto, entry);   // v25.0
     registrarUso('gpt', uso, 'M3');
     return texto;
   }
@@ -8143,7 +8220,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     entry.divSegmento = compararSegmento(ramo, ex.segmento);
     entry.emailPorte = checarEmailPorte(ex.emailInfo, ex.faturamentoMin);
     entry.iniciais = checarIniciais(ex.nomeEmpresa, ex.nomeContato)
-                  || nomeVemDoContato(ex.nomeEmpresa, ex.nomeContato);   // v24.2
+                  || nomeVemDoContato(ex.nomeEmpresa, ex.nomeContato)    // v24.2
+                  || iniciaisNoNome(ex.nomeEmpresa, ex.nomeContato);     // v25.0
     entry.enriq = lerEnriquecimento(ex.enriquecimento);
     return entry;
   }
