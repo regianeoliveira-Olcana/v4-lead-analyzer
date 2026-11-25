@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.2
-// @description  v25.2 · Gemini fora não derruba a análise (OpenAI com os resultados), sem busca nunca dá STOP, Jr no QSA, nome-descrição
+// @version      25.7
+// @description  v25.7 · lead novo destacado (borda vermelha, selo NOVO e pílula que leva até ele)
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.2';
+  const VERSION = '25.7';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -1152,7 +1152,13 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
   function lerLeadDaPagina() {
     const box = document.querySelector(SEL_DETALHE);
-    const t = box ? String(box.innerText || '').trim() : '';
+    if (!box) return null;
+    // v25.3: caso R COMPUTADORES — a faixa do botão fica DENTRO do painel do
+    // lead, e o texto dela ("Empresa · não localizada…") entrava na leitura e
+    // atrapalhava o cadastro (faturamento e contato sumiam). Lê sem ela.
+    let t = String(box.innerText || '');
+    box.querySelectorAll('[data-v4]').forEach(el => { const x = String(el.innerText || ''); if (x) t = t.replace(x, ''); });
+    t = t.trim();
     return t.length > 20 ? t : null;
   }
 
@@ -1185,7 +1191,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // serve — o navegador normaliza o estilo e a página entraria em laço.
   function assinaturaFaixa(entry, compacta) {
     const bs = entry.boxes || {};
-    return [compacta ? 'c' : 'd', (entry.farol || {}).rot].concat(
+    return [compacta ? 'c' : 'd', (entry.farol || {}).rot, entry._m2Rodando ? 'm2…' : (entry.m2 ? 'm2' : '')].concat(
       ['concorrente', 'empresa', 'decisor', 'margem'].map(k => `${(bs[k] || {}).cor}:${(bs[k] || {}).txt}`)).join('|');
   }
 
@@ -1203,14 +1209,21 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         <span style="white-space:nowrap;font-weight:700">${bola}${NOME_BOX[k][0]}</span>
         <span style="font-size:11px;opacity:.75;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(String(b.txt || ''))}</span></span>`;
     }).join('');
-    return `<div class="v4-faixa" data-v4="1" data-v4sig="${sig}" style="all:initial;display:block;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#141414;border:1px solid #2A2A2A;border-left:4px solid ${borda};border-radius:8px;padding:${compacta ? '4px 8px' : '8px 10px'};margin:${compacta ? '4px 0' : '8px 0'};cursor:pointer;line-height:1.5">
-      ${compacta ? '' : `<div style="font-size:10px;letter-spacing:.08em;opacity:.6;margin-bottom:4px">V4 · ${esc(f.rot || '')} · clique para detalhes</div>`}
+    return `<div class="v4-faixa" data-v4="1" data-v4sig="${sig}" style="all:initial;display:block;user-select:none;-webkit-user-select:none;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#141414;border:1px solid #2A2A2A;border-left:4px solid ${borda};border-radius:8px;padding:${compacta ? '4px 8px' : '8px 10px'};margin:${compacta ? '4px 0' : '8px 0'};cursor:pointer;line-height:1.5">
+      ${compacta ? '' : `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">
+        <span style="font-size:10px;letter-spacing:.08em;opacity:.6">V4 · ${esc(f.rot || '')} · clique para ver os detalhes</span>
+        ${entry._m2Rodando
+          ? '<span style="font-size:11px;font-weight:700;color:#FBBF24">⏳ aprofundando…</span>'
+          : (entry.m2
+            ? '<span style="font-size:11px;font-weight:700;color:#4ADE80">✓ aprofundado</span>'
+            : '<span data-v4act="m2" style="font-size:11px;font-weight:700;color:#0A0A0A;background:#FBBF24;border-radius:6px;padding:3px 9px;cursor:pointer;white-space:nowrap">🔍 Aprofundar</span>')}
+      </div>`}
       <div>${itens}</div></div>`;
   }
 
   function detalheHTML(entry) {
     const bs = entry.boxes || {};
-    return `<div class="v4-faixa-det" data-v4="1" style="all:initial;display:block;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#0E0E0E;border:1px solid #2A2A2A;border-radius:8px;padding:8px 10px;margin:-4px 0 8px;line-height:1.55">
+    return `<div class="v4-faixa-det" data-v4="1" style="all:initial;display:block;user-select:none;-webkit-user-select:none;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#0E0E0E;border:1px solid #2A2A2A;border-radius:8px;padding:8px 10px;margin:-4px 0 8px;line-height:1.55">
       ${['concorrente', 'empresa', 'decisor', 'margem'].map(k => {
         const b = bs[k] || {};
         return `<div style="margin:3px 0"><b style="color:${COR_FAIXA[b.cor] || '#999'}">${NOME_BOX[k][0]}</b> · ${esc(String(b.txt || ''))}${b.sub ? `<div style="opacity:.7">${esc(String(b.sub))}</div>` : ''}</div>`;
@@ -1232,12 +1245,34 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         if (velho) velho.remove();
         ancora.insertAdjacentHTML('afterend', faixaHTML(entry, false));
         const nova = pai && pai.querySelector(':scope > .v4-faixa');
-        if (nova) nova.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          const prox = nova.nextElementSibling;
-          if (prox && prox.classList.contains('v4-faixa-det')) prox.remove();
-          else nova.insertAdjacentHTML('afterend', detalheHTML(entry));
-        });
+        if (nova) {
+          // v25.3: pedido da unidade — 2 cliques na tarja roda o Momento 2, sem
+          // abrir o painel do botão. O clique simples espera um instante para
+          // não abrir e fechar os detalhes no meio do duplo clique.
+          let timerClique = null;
+          nova.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            clearTimeout(timerClique);
+            // v25.6: botão visível "🔍 Aprofundar" — o duplo clique era difícil de descobrir
+            if (ev.target && ev.target.closest && ev.target.closest('[data-v4act="m2"]')) {
+              aprofundarPelaFaixa(entry);
+              return;
+            }
+            timerClique = setTimeout(() => {
+              const prox = nova.nextElementSibling;
+              if (prox && prox.classList.contains('v4-faixa-det')) prox.remove();
+              else nova.insertAdjacentHTML('afterend', detalheHTML(entry));
+            }, 260);
+          });
+          nova.addEventListener('dblclick', (ev) => {
+            ev.stopPropagation(); ev.preventDefault();
+            clearTimeout(timerClique);
+            // v25.4: o duplo clique seleciona palavras da tarja — não é lead
+            ignorarSelecaoAte = Date.now() + 1500;
+            try { window.getSelection().removeAllRanges(); } catch (e) {}
+            aprofundarPelaFaixa(entry);
+          });
+        }
       }
     }
     document.querySelectorAll(SEL_CARD).forEach(card => {
@@ -1301,7 +1336,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const partes = [nome, ex && ex.faturamento, ex && ex.segmento, ex && ex.canal].filter(Boolean);
     apitar();
     piscarTitulo();
-    const abrir = () => { try { window.focus(); card.scrollIntoView({ block: 'center' }); card.click(); } catch (e) {} };
+    const abrir = () => { try { window.focus(); card.scrollIntoView({ block: 'center' }); card.click(); novosLeads.delete(chaveNome(nome)); destacarNovos(); } catch (e) {} };
     try {
       if (typeof GM_notification === 'function') {
         GM_notification({ title: 'Novo lead no LeadBroker', text: partes.join(' · '), timeout: 10000, onclick: abrir });
@@ -1311,6 +1346,76 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
     } catch (e) {}
     console.log('[V4] lead novo:', partes.join(' · '));
+  }
+
+  // ── v25.7: destaque do lead novo
+  // A unidade aprovou o som, mas com vários cards na tela era preciso procurar
+  // qual era o novo. Agora o card novo ganha borda vermelha e o selo "🆕 NOVO"
+  // até ser aberto (ou por 3 minutos), e uma pílula no topo leva até ele.
+  const novosLeads = new Map();   // chave do nome → { ate, t }
+  const NOVO_MS = 3 * 60 * 1000;
+
+  function marcarNovo(k) { const agora = Date.now(); novosLeads.set(k, { ate: agora + NOVO_MS, t: agora }); }
+
+  function destacarNovos() {
+    const agora = Date.now();
+    for (const [k, v] of novosLeads) if (v.ate < agora) novosLeads.delete(k);
+    let n = 0;
+    document.querySelectorAll(SEL_CARD).forEach(card => {
+      const k = chaveNome(nomeDoCard(card));
+      const selo = card.querySelector(':scope > .v4-novo');
+      if (k && novosLeads.has(k)) {
+        n++;
+        if (!selo) card.insertAdjacentHTML('afterbegin', '<div class="v4-novo" data-v4="1" style="all:initial;display:inline-block;user-select:none;-webkit-user-select:none;font-family:Inter,Arial,sans-serif;font-size:11px;font-weight:800;color:#FFFFFF;background:#E30613;border-radius:6px;padding:2px 8px;margin:4px 0;letter-spacing:.05em">🆕 NOVO</div>');
+        if (card.dataset.v4outline !== '1') {
+          card.dataset.v4outline = '1';
+          card.style.outline = '3px solid #E30613';
+          card.style.outlineOffset = '2px';
+        }
+        if (!card.dataset.v4novoclick) {
+          card.dataset.v4novoclick = '1';
+          card.addEventListener('click', () => { novosLeads.delete(chaveNome(nomeDoCard(card))); destacarNovos(); }, true);
+        }
+      } else {
+        if (selo) selo.remove();
+        if (card.dataset.v4outline === '1') {
+          card.dataset.v4outline = '';
+          card.style.outline = '';
+          card.style.outlineOffset = '';
+        }
+      }
+    });
+    pilulaNovos(n);
+  }
+
+  function pilulaNovos(n) {
+    let p = document.getElementById('v4-novos-pill');
+    if (!n) { if (p) p.remove(); return; }
+    if (!p) {
+      p = document.createElement('div');
+      p.id = 'v4-novos-pill';
+      p.setAttribute('data-v4', '1');
+      p.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483646;'
+        + 'background:#E30613;color:#FFFFFF;font:800 13px Inter,Arial,sans-serif;padding:8px 16px;border-radius:999px;'
+        + 'box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer;user-select:none;-webkit-user-select:none';
+      p.addEventListener('click', () => irParaNovo());
+      document.body.appendChild(p);
+    }
+    p.textContent = `🔔 ${n} lead${n > 1 ? 's' : ''} novo${n > 1 ? 's' : ''} — ver`;
+  }
+
+  // leva ao lead novo mais recente; cliques seguidos passam pelos outros
+  function irParaNovo() {
+    const ordem = [...novosLeads.entries()].sort((a, b) => b[1].t - a[1].t).map(([k]) => k);
+    if (!ordem.length) return;
+    // 1º clique: o mais recente; cliques seguidos passam pelos outros
+    irParaNovo.i = (typeof irParaNovo.i === 'number' ? irParaNovo.i + 1 : 0) % ordem.length;
+    const alvo = ordem[irParaNovo.i];
+    const card = [...document.querySelectorAll(SEL_CARD)].find(c => chaveNome(nomeDoCard(c)) === alvo);
+    if (card) {
+      try { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { card.scrollIntoView(); }
+      card.animate && card.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.03)' }, { transform: 'scale(1)' }], { duration: 500 });
+    }
   }
 
   function vigiarLeilao() {
@@ -1324,13 +1429,16 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       if (alertaSemeado) {
         let ex = null;
         try { ex = preExtract(textoDoCard(card)); } catch (e) {}
+        marcarNovo(k);   // v25.7
         avisarLeadNovo(card, nome, ex);
       }
     });
     alertaSemeado = true;   // os que já estavam na tela quando a página abriu não apitam
     const aberto = chaveNome(nomeNoDetalhe());
     if (aberto && !temposLeilao.aberto.has(aberto)) temposLeilao.aberto.set(aberto, agora);
+    if (aberto) novosLeads.delete(aberto);   // v25.7: abriu o lead, deixa de ser "novo"
     repintarPagina();
+    try { destacarNovos(); } catch (e) {}
   }
 
   // ── duplo clique: analisa o lead do painel, sem marcar texto
@@ -1361,11 +1469,27 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     await adicionarLead(texto);
   }
 
+  // v25.3: Momento 2 pelo duplo clique na tarja do LeadBroker
+  async function aprofundarPelaFaixa(entry) {
+    if (!entry || entry._m2Rodando) return;
+    if (entry.m2) { mostrarDica('Este lead já foi aprofundado. Use ↻ no painel do botão para refazer.', 2500); return; }
+    if (!entry.card) { mostrarDica('Abra o painel do botão uma vez e tente de novo.', 2500); return; }
+    entry._m2Rodando = true;
+    try { pintarNaPagina(entry); } catch (e) {}
+    try { await doM2(entry); }
+    finally { entry._m2Rodando = false; try { pintarNaPagina(entry); } catch (e) {} }
+  }
+
   function aoDuploClique(ev) {
     if (GM_getValue('v4_duplo_clique', '1') !== '1') return;
     const alvo = ev.target;
     if (!alvo || !alvo.closest) return;
     if (alvo.closest('#v4-overlay, [id^="v4-"]')) return;   // o painel do botão não é lead
+    if (alvo.closest('[data-v4]')) {   // v25.3: 2 cliques na tarja é Momento 2, não nova análise
+      ignorarSelecaoAte = Date.now() + 1500;   // v25.5: vale também para a tarja do card da lista
+      try { window.getSelection().removeAllRanges(); } catch (e) {}
+      return;
+    }
     const card = alvo.closest(SEL_CARD);
     const det = alvo.closest(SEL_DETALHE);
     if (!card && !det) return;
@@ -10354,6 +10478,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     while (n && n !== document.body) {
       if (n.id === 'v4-overlay' || n.id === 'v4-hist-overlay' || n.id === 'v4-panel'
           || n.id === 'v4-hist-panel' || n.id === 'v4-fab') return true;
+      // v25.4: a tarja e os detalhes que o botão põe na página do LeadBroker
+      if (n.dataset && n.dataset.v4) return true;
       n = n.parentNode;
     }
     return false;
@@ -10395,6 +10521,17 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
   function pareceLead(texto) { return avaliarSelecao(texto).ok; }
 
+  // v25.5: tem empresa ou contato de verdade? Texto dos boxes do botão não conta.
+  const FRASE_DO_BOTAO = /r[ée]gua de margem|aprofunde ou confirme|contato n[ãa]o informado|n[ãa]o classificada|n[ãa]o determinado|n[ãa]o localizada|clique: detalhes|marque o bloco todo/i;
+  function leadTemQuem(texto) {
+    let ex = null;
+    try { ex = preExtract(texto); } catch (e) { return true; }   // na dúvida, deixa analisar
+    const emp = String(ex.nomeEmpresa || '');
+    const empOk = !!emp && nomeEmpresaPlausivel(emp) && !FRASE_DO_BOTAO.test(emp);
+    const contOk = !!ex.nomeContato && !FRASE_DO_BOTAO.test(String(ex.nomeContato));
+    return empOk || contOk;
+  }
+
 
 
   let autoTimer = null;
@@ -10423,11 +10560,18 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     if (Date.now() < ignorarSelecaoAte) return;   // v25.1: palavra do duplo clique
     if (selecaoDentroDoPainel()) return;   // seleção no painel do V4 não é lead
     let sel = (window.getSelection().toString() || '').trim();
+    // v25.5: tira da seleção o texto das tarjas do botão que estão na página
+    document.querySelectorAll('[data-v4]').forEach(el => { const x = String(el.innerText || '').trim(); if (x && x.length > 3) sel = sel.split(x).join(''); });
+    sel = sel.trim();
     // v25.1: ⌘A pega a página inteira, inclusive o painel do botão (um lead virou
     // "ex.nomeEmpresa || ''"). Com o painel do lead aberto, lê só ele.
     const pag = lerLeadDaPagina();
     if (pag && sel.length > pag.length * 1.5 && sel.includes(pag.split('\n')[0])) sel = pag;
     if (!sel || sel === ultimoAuto) return;
+    // v25.4: caso "contato n/d" — 2 cliques na tarja selecionaram o texto dos
+    // boxes ("aprofunde ou confirme na ligação", "ramo fora da régua…") e isso
+    // virou um lead vazio, analisado com gasto de API. Texto do botão não é lead.
+    if (/r[ée]gua de margem|aprofunde ou confirme na liga|clique: detalhes|2 cliques: aprofundar|marque o bloco todo do lead|V4 · (GO|CAUTION|STOP|CONCORRENTE)/i.test(sel)) return;
 
     const av = avaliarSelecao(sel);
     if (!av.ok) {
@@ -10612,6 +10756,14 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     // mas a validação que rejeita ("não consegui identificar empresa") acontece
     // antes. Texto colado numa linha só era descartado sem nunca chegar lá.
     const texto = reporQuebras(textoCru);
+
+    // v25.5: caso "contato n/d" — o texto da tarja virou um lead vazio e gastou
+    // API duas vezes. Sem empresa e sem contato não há o que investigar.
+    if (!leadTemQuem(texto)) {
+      mostrarDica('<b>Não reconheci um lead</b><br>Não achei nome de empresa nem de contato no texto.', 3500);
+      console.warn('[V4] texto sem empresa e sem contato — não analisado');
+      return;
+    }
 
     if (duplicataNaFila(texto)) {
       openPanel();
