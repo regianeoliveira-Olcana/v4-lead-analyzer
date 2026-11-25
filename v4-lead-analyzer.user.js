@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.0
-// @description  v25.0 · dossiê visual e enxuto; faturamento muito acima do porte segura a margem; iniciais no nome
+// @version      25.2
+// @description  v25.2 · Gemini fora não derruba a análise (OpenAI com os resultados), sem busca nunca dá STOP, Jr no QSA, nome-descrição
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        GM_listValues
+// @grant        GM_notification
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @connect      api.openai.com
@@ -35,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.0';
+  const VERSION = '25.2';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -687,25 +688,23 @@ perguntas de SPICED nem frase de vender a reunião.
   PORTE MAIOR QUE O DECLARADO". A declaração do contato NUNCA é indício de porte
   maior.
 
-FORMATO DE SAÍDA — VISUAL, PARA BATER O OLHO:
+FORMATO DE SAÍDA — SÓ A LEITURA, VISUAL, PARA BATER O OLHO:
+[O dossiê de handoff tem 3 partes. A FICHA DO LEAD (parte 1) e o HANDOFF
+ (parte 3) são montados pelo script com os dados da pesquisa. Você escreve
+ SÓ a parte 2, a leitura. Não repita ficha, cadastro, sócios nem campos para
+ preencher — o script já põe.]
 [Linhas curtas. Use os ícones e símbolos exatamente assim:
  ✖ contradição (declarado ➜ achado) · ⭐ hipótese principal · ⚠ dor da etapa ·
  ➜ sequência ou conclusão · ✔ sinal observável. Nenhuma seção passa de 5 itens.]
 
-═══ [EMPRESA] ═══
-[🟢/🟡/🔴] [FAROL do contexto]  ·  [motivo em poucas palavras]
-
 [SÓ SE o contexto trouxer "SINAIS DE PORTE MAIOR QUE O DECLARADO":]
 ⚡ PORTE PODE SER MAIOR  ·  [os sinais do contexto, separados por · ]
 
-👤 QUEM É
-  [contato · papel achado, ou "papel a confirmar"]
-  [ramo REAL investigado · cidade]
-  [CNPJ adotado · situação · desde quando · porte]
-  [💵 faturamento declarado · 📲 canal · site/@ se houver]
-
 ⚠️ CONTRADIÇÕES
   ✖ [declarado] ➜ [achado]
+  [Não liste: segmento marcado no formulário × ramo real (o formulário erra
+   sempre); razão social × nome do lead em empresário individual (a razão é
+   o nome do titular); cidade que veio do DDD como se fosse declarada.]
 
 💰 DINHEIRO NA MESA  (hipóteses)
 [Leia o bowtie inteiro: muitas vezes o dinheiro está na base, não em lead novo.
@@ -1039,7 +1038,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     alvo.innerHTML = ordem.map(k => {
       const b = f.boxes[k];
       const ic = b.cor === 'verde' ? '✓' : b.cor === 'concorrente' ? '🚨' : b.cor === 'vermelho' ? '✕' : '⚠';
-      return `<div class="v4-box ${b.cor}">
+      // v25.1: laranja = sinal contra; leva "amarelo" junto para o farol ler CAUTION
+      return `<div class="v4-box ${b.cor === 'laranja' ? 'amarelo laranja' : b.cor}">
           <div class="v4-box-lbl">${ic} ${esc(b.titulo)}</div>
           <div class="v4-box-txt">${esc(b.txt)}</div>
           ${b.sub ? `<div class="v4-box-sub">${esc(b.sub)}</div>` : ''}
@@ -1121,7 +1121,277 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // repintado depois do M2, da Receita e da troca de CNPJ — e a lista só
     // era redesenhada em alguns desses caminhos. Agora acompanha todos.
     agendarRail();
+    // v25.1: faixa com os 4 boxes na página do LeadBroker + tempo até o farol
+    try {
+      if (entry.tempos && !entry.tempos.farol) entry.tempos.farol = Date.now();
+      const dono = donoDaEmpresa(entry.oficial);
+      entry.dono = dono ? `${dono.tipo === 'titular' ? 'Titular' : 'Sócios'}: ${dono.nomes.slice(0, 4).join(' · ')}` : null;
+      pintarNaPagina(entry);
+    } catch (e) { console.warn('[V4] faixa na página:', e); }
 }
+
+  // ═══════════════════════════════════════════════════════════════
+  // LEILÃO NA PRÓPRIA PÁGINA (v25.1)
+  //
+  // A unidade estava perdendo lead bom por tempo: marcar texto, apertar o
+  // botão, clicar no nome para ver a análise. Agora:
+  //   · alerta quando um lead novo cai (som, notificação, título piscando)
+  //   · duplo clique no card ou no painel do lead → analisa, sem marcar texto
+  //   · faixa com os 4 boxes por nome e cor no card e no painel do LeadBroker
+  //   · tempos medidos por SDR (lead apareceu → abriu → pediu → farol)
+  // Os identificadores vêm da própria página do LeadBroker (data-testid).
+  // ═══════════════════════════════════════════════════════════════
+  const SEL_CARD = '[data-testid="auction-card"]';
+  const SEL_DETALHE = '[data-testid="company-details-container"], [data-testid="company-details-section"]';
+  const SEL_TITULO = '[data-testid="company-details-title"]';
+
+  const chaveNome = (n) => normalizarTexto(String(n || '')).replace(/[^a-z0-9]/g, '');
+  const temposLeilao = { apareceu: new Map(), aberto: new Map() };
+  let proximaOrigem = null;
+  let ignorarSelecaoAte = 0;
+
+  function lerLeadDaPagina() {
+    const box = document.querySelector(SEL_DETALHE);
+    const t = box ? String(box.innerText || '').trim() : '';
+    return t.length > 20 ? t : null;
+  }
+
+  function nomeNoDetalhe() {
+    const t = document.querySelector(SEL_TITULO);
+    return t ? String(t.textContent || '').trim() : '';
+  }
+
+  // texto do card sem a faixa que o próprio botão colocou nele
+  function textoDoCard(card) {
+    let t = String(card.innerText || '');
+    card.querySelectorAll('[data-v4]').forEach(el => { const x = String(el.innerText || ''); if (x) t = t.replace(x, ''); });
+    return t;
+  }
+
+  function nomeDoCard(card) {
+    if (!card) return '';
+    if (card.dataset.v4nome) return card.dataset.v4nome;
+    let nome = '';
+    try { nome = preExtract(textoDoCard(card)).nomeEmpresa || ''; } catch (e) {}
+    if (nome) card.dataset.v4nome = nome;
+    return nome;
+  }
+
+  // ── faixa com os 4 boxes (🟢 verde · 🟡 falta informação · 🟠 sinal contra · 🔴 veto)
+  const COR_FAIXA = { verde: '#16A34A', amarelo: '#EAB308', laranja: '#EA580C', vermelho: '#DC2626', concorrente: '#DC2626' };
+  const NOME_BOX = { concorrente: ['Concorrente', 'Conc'], empresa: ['Empresa', 'Emp'], decisor: ['Decisor', 'Dec'], margem: ['Margem', 'Marg'] };
+
+  // assinatura: só repinta quando o conteúdo muda. Comparar o HTML inteiro não
+  // serve — o navegador normaliza o estilo e a página entraria em laço.
+  function assinaturaFaixa(entry, compacta) {
+    const bs = entry.boxes || {};
+    return [compacta ? 'c' : 'd', (entry.farol || {}).rot].concat(
+      ['concorrente', 'empresa', 'decisor', 'margem'].map(k => `${(bs[k] || {}).cor}:${(bs[k] || {}).txt}`)).join('|');
+  }
+
+  function faixaHTML(entry, compacta) {
+    const bs = entry.boxes || {};
+    const f = entry.farol || {};
+    const sig = esc(assinaturaFaixa(entry, compacta));
+    const borda = COR_FAIXA[f.conc ? 'concorrente' : f.cor] || '#6B7280';
+    const itens = ['concorrente', 'empresa', 'decisor', 'margem'].map(k => {
+      const b = bs[k] || {};
+      const c = COR_FAIXA[b.cor] || '#6B7280';
+      const bola = `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin-right:4px;vertical-align:middle"></span>`;
+      if (compacta) return `<span style="margin-right:8px;white-space:nowrap">${bola}${NOME_BOX[k][1]}</span>`;
+      return `<span style="display:inline-flex;flex-direction:column;margin-right:14px;min-width:0">
+        <span style="white-space:nowrap;font-weight:700">${bola}${NOME_BOX[k][0]}</span>
+        <span style="font-size:11px;opacity:.75;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(String(b.txt || ''))}</span></span>`;
+    }).join('');
+    return `<div class="v4-faixa" data-v4="1" data-v4sig="${sig}" style="all:initial;display:block;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#141414;border:1px solid #2A2A2A;border-left:4px solid ${borda};border-radius:8px;padding:${compacta ? '4px 8px' : '8px 10px'};margin:${compacta ? '4px 0' : '8px 0'};cursor:pointer;line-height:1.5">
+      ${compacta ? '' : `<div style="font-size:10px;letter-spacing:.08em;opacity:.6;margin-bottom:4px">V4 · ${esc(f.rot || '')} · clique para detalhes</div>`}
+      <div>${itens}</div></div>`;
+  }
+
+  function detalheHTML(entry) {
+    const bs = entry.boxes || {};
+    return `<div class="v4-faixa-det" data-v4="1" style="all:initial;display:block;font-family:Inter,Arial,sans-serif;font-size:12px;color:#E5E5E5;background:#0E0E0E;border:1px solid #2A2A2A;border-radius:8px;padding:8px 10px;margin:-4px 0 8px;line-height:1.55">
+      ${['concorrente', 'empresa', 'decisor', 'margem'].map(k => {
+        const b = bs[k] || {};
+        return `<div style="margin:3px 0"><b style="color:${COR_FAIXA[b.cor] || '#999'}">${NOME_BOX[k][0]}</b> · ${esc(String(b.txt || ''))}${b.sub ? `<div style="opacity:.7">${esc(String(b.sub))}</div>` : ''}</div>`;
+      }).join('')}
+      ${entry.dono ? `<div style="margin-top:6px;opacity:.85">👤 ${esc(entry.dono)}</div>` : ''}
+    </div>`;
+  }
+
+  function pintarNaPagina(entry) {
+    if (!entry || !entry.boxes || !entry.farol) return;
+    const k = chaveNome(entry.extracted && entry.extracted.nomeEmpresa);
+    if (!k) return;
+    const tit = document.querySelector(SEL_TITULO);
+    if (tit && chaveNome(tit.textContent) === k) {
+      const ancora = tit.closest('div') || tit;
+      const pai = ancora.parentElement;
+      const velho = pai && pai.querySelector(':scope > .v4-faixa');
+      if (!velho || velho.dataset.v4sig !== assinaturaFaixa(entry, false)) {
+        if (velho) velho.remove();
+        ancora.insertAdjacentHTML('afterend', faixaHTML(entry, false));
+        const nova = pai && pai.querySelector(':scope > .v4-faixa');
+        if (nova) nova.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const prox = nova.nextElementSibling;
+          if (prox && prox.classList.contains('v4-faixa-det')) prox.remove();
+          else nova.insertAdjacentHTML('afterend', detalheHTML(entry));
+        });
+      }
+    }
+    document.querySelectorAll(SEL_CARD).forEach(card => {
+      if (chaveNome(nomeDoCard(card)) !== k) return;
+      const velho = card.querySelector(':scope .v4-faixa');
+      if (velho && velho.dataset.v4sig === assinaturaFaixa(entry, true)) return;
+      if (velho) velho.remove();
+      card.insertAdjacentHTML('afterbegin', faixaHTML(entry, true));
+    });
+  }
+
+  // o LeadBroker redesenha os cards (React) e apaga a faixa — repinta tudo
+  function repintarPagina() {
+    const vistos = new Set();
+    for (let i = queue.length - 1; i >= 0; i--) {
+      const e = queue[i];
+      const k = e && e.extracted && chaveNome(e.extracted.nomeEmpresa);
+      if (!k || vistos.has(k)) continue;
+      vistos.add(k);
+      try { pintarNaPagina(e); } catch (err) {}
+    }
+  }
+
+  // ── alerta de lead novo
+  const leadsVistos = new Set();
+  let alertaSemeado = false, piscaTimer = null;
+  const tituloOriginal = document.title;
+
+  function apitar() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = apitar.ctx || (apitar.ctx = new Ctx());
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); o.stop(ctx.currentTime + 0.4);
+    } catch (e) {}
+  }
+
+  function piscarTitulo() {
+    if (piscaTimer) return;
+    let liga = false;
+    piscaTimer = setInterval(() => { liga = !liga; document.title = liga ? '🔴 NOVO LEAD' : tituloOriginal; }, 900);
+    const parar = () => {
+      clearInterval(piscaTimer); piscaTimer = null; document.title = tituloOriginal;
+      window.removeEventListener('focus', parar);
+    };
+    window.addEventListener('focus', parar);
+    document.addEventListener('mousemove', parar, { once: true });
+    setTimeout(parar, 60000);
+  }
+
+  function avisarLeadNovo(card, nome, ex) {
+    if (GM_getValue('v4_alerta_lead', '1') !== '1') return;
+    const min = Number(GM_getValue('v4_alerta_min_fat', '') || 0);
+    if (min && ex && ex.faturamentoMin && ex.faturamentoMin < min) return;
+    const partes = [nome, ex && ex.faturamento, ex && ex.segmento, ex && ex.canal].filter(Boolean);
+    apitar();
+    piscarTitulo();
+    const abrir = () => { try { window.focus(); card.scrollIntoView({ block: 'center' }); card.click(); } catch (e) {} };
+    try {
+      if (typeof GM_notification === 'function') {
+        GM_notification({ title: 'Novo lead no LeadBroker', text: partes.join(' · '), timeout: 10000, onclick: abrir });
+      } else if (window.Notification && Notification.permission === 'granted') {
+        const n = new Notification('Novo lead no LeadBroker', { body: partes.join(' · ') });
+        n.onclick = abrir;
+      }
+    } catch (e) {}
+    console.log('[V4] lead novo:', partes.join(' · '));
+  }
+
+  function vigiarLeilao() {
+    const agora = Date.now();
+    document.querySelectorAll(SEL_CARD).forEach(card => {
+      const nome = nomeDoCard(card);
+      const k = chaveNome(nome);
+      if (!k || leadsVistos.has(k)) return;
+      leadsVistos.add(k);
+      temposLeilao.apareceu.set(k, agora);
+      if (alertaSemeado) {
+        let ex = null;
+        try { ex = preExtract(textoDoCard(card)); } catch (e) {}
+        avisarLeadNovo(card, nome, ex);
+      }
+    });
+    alertaSemeado = true;   // os que já estavam na tela quando a página abriu não apitam
+    const aberto = chaveNome(nomeNoDetalhe());
+    if (aberto && !temposLeilao.aberto.has(aberto)) temposLeilao.aberto.set(aberto, agora);
+    repintarPagina();
+  }
+
+  // ── duplo clique: analisa o lead do painel, sem marcar texto
+  function aguardarDetalhe(nomeEsperado, ms) {
+    const k = chaveNome(nomeEsperado);
+    return new Promise(res => {
+      const t0 = Date.now();
+      const tick = () => {
+        const ok = !k || chaveNome(nomeNoDetalhe()) === k;
+        if (ok && lerLeadDaPagina()) return res(true);
+        if (Date.now() - t0 > ms) return res(false);
+        setTimeout(tick, 120);
+      };
+      tick();
+    });
+  }
+
+  async function analisarDaPagina(nomeCard) {
+    const okDet = await aguardarDetalhe(nomeCard, 2500);
+    const texto = lerLeadDaPagina();
+    if (!okDet || !texto) {
+      mostrarDica('<b>Não achei o painel do lead</b><br>Abra o lead e dê o duplo clique de novo.', 3500);
+      return;
+    }
+    const k = chaveNome(nomeNoDetalhe() || nomeCard);
+    proximaOrigem = { origem: 'duplo clique', pedido: Date.now(),
+      apareceu: temposLeilao.apareceu.get(k) || null, aberto: temposLeilao.aberto.get(k) || null };
+    await adicionarLead(texto);
+  }
+
+  function aoDuploClique(ev) {
+    if (GM_getValue('v4_duplo_clique', '1') !== '1') return;
+    const alvo = ev.target;
+    if (!alvo || !alvo.closest) return;
+    if (alvo.closest('#v4-overlay, [id^="v4-"]')) return;   // o painel do botão não é lead
+    const card = alvo.closest(SEL_CARD);
+    const det = alvo.closest(SEL_DETALHE);
+    if (!card && !det) return;
+    ignorarSelecaoAte = Date.now() + 1500;   // o duplo clique seleciona uma palavra — não é análise
+    try { window.getSelection().removeAllRanges(); } catch (e) {}
+    analisarDaPagina(card ? nomeDoCard(card) : nomeNoDetalhe());
+  }
+
+  // ── prévia: com a Receita em mãos, Empresa e Concorrente aparecem antes da IA
+  function previaDaReceita(entry, emp) {
+    if (!entry || !entry.card || !emp) return;
+    const checks = entry.card.querySelectorAll('.v4-check.pending');
+    const set = (idx, ic, txt) => {
+      const el = checks[idx];
+      if (!el) return;
+      const i = el.querySelector('.v4-check-icon'); if (i) i.textContent = ic;
+      const d = el.querySelector('.v4-check-detail'); if (d) d.textContent = txt;
+    };
+    const cnae = String(emp.cnae || '');
+    const agencia = CNAE_CONC.some(c => cnae.startsWith(c));
+    set(0, agencia ? '🚨' : '◔', agencia ? `CNAE de agência: ${cnae.slice(0, 50)}` : `CNAE: ${cnae.slice(8, 60) || '—'} · confirmando`);
+    set(1, /^ATIVA/i.test(String(emp.situacao || '')) ? '✓' : '⚠',
+      `CNPJ ${fmtCnpj(emp.cnpj)} · ${String(emp.situacao || '').toLowerCase()} · ${String(emp.porte || '').toLowerCase()}`);
+    const dono = donoDaEmpresa(emp);
+    if (dono) set(2, '◔', `${dono.tipo === 'titular' ? 'titular' : 'sócios'}: ${dono.nomes.slice(0, 2).join(', ')} · confirmando`);
+  }
 
   let railAgendado = false;
   function agendarRail() {
@@ -1131,6 +1401,38 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       railAgendado = false;
       try { renderRail(); } catch (e) { console.warn('[V4] trilha:', e); }
     }, 0);
+  }
+
+  // v25.1: caso MASTER VIAGENS — a investigação citou o CNPJ 40.090.090/0001-00,
+  // que não existe (o final certo dessa raiz seria -73). Todo CNPJ passa por aqui.
+  function cnpjValido(c) {
+    const d = String(c || '').replace(/\D/g, '');
+    if (d.length !== 14 || /^(\d)\1{13}$/.test(d)) return false;
+    const dv = (base) => {
+      const pesos = base.length === 12 ? [5,4,3,2,9,8,7,6,5,4,3,2] : [6,5,4,3,2,9,8,7,6,5,4,3,2];
+      const soma = base.split('').reduce((acc, n, i) => acc + Number(n) * pesos[i], 0);
+      const r = soma % 11;
+      return r < 2 ? 0 : 11 - r;
+    };
+    const d1 = dv(d.slice(0, 12));
+    const d2 = dv(d.slice(0, 12) + d1);
+    return d.slice(12) === `${d1}${d2}`;
+  }
+
+  // v25.1: caso LOJAILEAXE — a loja vende pelo Mercado Livre, e o rodapé do
+  // anúncio traz o CNPJ da plataforma. O card adotou o Mercado Livre: CNAE de
+  // "agenciamento" (veto de concorrente), porte "demais", margem "imobiliário".
+  const PLATAFORMA_RE = /mercado ?livre|ebazar|mercado ?pago|shopee|amazon|magazine luiza|magalu|americanas|\bb2w\b|via varejo|casas bahia|\bifood\b|hotmart|kiwify|eduzz|elo ?7|\bolx\b|nuvemshop|tiendanube|loja integrada|tray tecnologia|shopify|\bwix\b|facebook|instagram|whatsapp|google brasil|pagseguro|pagbank|\bstone\b|cielo|getnet|netshoes|aliexpress|shein|temu/i;
+  const PLATAFORMA_RAIZ = new Set(['03007331', '10573521', '35635824', '15436940', '47960950',
+    '00776574', '14380200', '13347016', '06990590', '08561701']);
+  function cnpjDePlataforma(emp, nomeLead) {
+    if (!emp) return false;
+    const raiz = String(emp.cnpj || '').replace(/\D/g, '').slice(0, 8);
+    const nome = `${emp.razao_social || ''} ${emp.nome_fantasia || ''}`;
+    const ehPlat = PLATAFORMA_RAIZ.has(raiz) || PLATAFORMA_RE.test(nome);
+    if (!ehPlat) return false;
+    const m = nome.match(PLATAFORMA_RE);
+    return !(m && nomeLead && normalizarTexto(nomeLead).includes(normalizarTexto(m[0])));
   }
 
   function fmtCnpj(c) {
@@ -1456,6 +1758,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       else semProva.push(e);
     }
 
+    // v25.1: caso TERROIR PANTANAL — contato "Stephanie", e a busca trouxe a
+    // advocacia e o pet shop de OUTRAS Stephanies. Com um nome só, empresa
+    // achada pelo nome da pessoa é homônima — vale só a que prova ser do lead.
+    const partesContato = partesNome(ex.nomeContato || '').filter(p => p.length > 1);
+    if (partesContato.length < 2) {
+      const IDENT = /nome do lead|CNPJ bate|mesma raiz/i;
+      for (let i = comProva.length - 1; i >= 0; i--) {
+        const e = comProva[i];
+        if (!(e._peloCnpj || IDENT.test(String((e._prova || {}).prova || '')))) {
+          semProva.push(e); comProva.splice(i, 1);
+        }
+      }
+    }
     let lista = comProva;
 
     // v19.9: se ALGUMA empresa bateu pelo prefixo do CNPJ, ela é a do lead e as
@@ -1504,7 +1819,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // Não é veto: a agência pode estar preenchendo o formulário para um cliente.
   // Mas o SDR precisa saber com quem vai falar antes de ligar.
   // ═══════════════════════════════════════════════════════════════
-  const SINAL_AGENCIA = /ag[êe]ncia|publicidade|propaganda|marketing|m[íi]dia|comunica[çc][ãa]o|assessoria de imprensa|growth|performance|inbound|digital\s?(house|lab)|social\s?media/i;
+  const SINAL_AGENCIA = /ag[êe]ncias? (de |digital)?(marketing|publicidade|propaganda|comunica|digital|m[íi]dia|tr[áa]fego|conte[úu]do|criativa|performance)|publicidade|propaganda|marketing|m[íi]dia|comunica[çc][ãa]o|assessoria de imprensa|growth|performance|inbound|digital\s?(house|lab)|social\s?media/i;
 
   // v16.7: "Soluções", "Comércio", "Digital" aparecem em milhares de razões
   // sociais que nada têm a ver com marketing. O nome sozinho não prova —
@@ -1986,7 +2301,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const f = entry.farol;
     if (!f || !f.boxes) return false;
     if (f.conc) return false;                       // concorrente: já vetado
-    return Object.values(f.boxes).some(b => b.cor === 'amarelo' || b.cor === 'vermelho');
+    return Object.values(f.boxes).some(b => b.cor === 'amarelo' || b.cor === 'laranja' || b.cor === 'vermelho');
   }
 
   function enfileirarM2(entry) {
@@ -2050,8 +2365,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (!nomeLead || !oficial) return null;
     const lead = normalizarTexto(nomeLead).replace(/[^a-z0-9 ]/g, ' ').trim();
     if (lead.length < 3) return null;
-    const partes = lead.split(/\s+/).filter(p => p.length > 2 && parteDistintiva(p) && !PALAVRA_DE_RAMO.test(p));
-    if (!partes.length) return null;
+    // v25.1: caso GIRA PEÇAS — "peças" casou com "AUTO GIRO MOTO PEÇAS". Palavra
+    // de comércio genérica não identifica empresa nenhuma.
+    const GENERICA = /^(pecas?|com|serv|servicos?|comercio|comercial|loja|distribuidora|industria|grupo|brasil|center|centro|store|shop|express|central|nova?|mega|super|total|solucoes|ltda)$/;
+    const partes = lead.split(/\s+/).filter(p => p.length > 2 && parteDistintiva(p) && !PALAVRA_DE_RAMO.test(p) && !GENERICA.test(p));
+    // v25.1: caso MASTER VIAGENS — "master" é comum e "viagens" é palavra de
+    // ramo; não sobrava nada para comparar. O nome INTEIRO dentro da razão
+    // social ("MASTER VIAGENS E TURISMO LTDA") é prova de que é a empresa.
+    const inteiro = lead.replace(/\b(ltda|me|epp|eireli|s a|sa)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!partes.length) {
+      if (inteiro.split(' ').length < 2 || inteiro.length < 8) return null;
+      const contem = (campo) => normalizarTexto(campo || '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').includes(inteiro);
+      return contem(oficial.razao_social) ? 'razão social' : contem(oficial.nome_fantasia) ? 'nome fantasia' : null;
+    }
 
     const testa = (campo, rot) => {
       const v = normalizarTexto(campo || '').replace(/[^a-z0-9 ]/g, ' ');
@@ -2161,6 +2487,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     }
 
     // 5) filiais
+    // v25.1: caso NEXFIELD — porte "DEMAIS" = acima de R$ 4,8 mi/ano
+    if (/demais/i.test(String(of.porte || '')) && fat && fat < 400000) sinais.push('porte "demais" na Receita (acima de R$ 400 mil/mês)');
     if (of.matrizFilial === 'filial') sinais.push('é filial de um grupo');
 
     // 6) cargo do contato indica estrutura (gerente, diretor, coordenador)
@@ -2220,7 +2548,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // ═══════════════════════════════════════════════════════════════
   const VENDE_CRESCIMENTO = new RegExp([
     // marketing e publicidade
-    'ag[\u00ea e]ncia', 'publicidade', 'propaganda', 'marketing', 'm[\u00ed i]dia paga',
+    // v25.1: "agência" sozinha vetava agência de VIAGENS (MASTER VIAGENS) e
+    // "agenciamento de serviços" (CNAE do Mercado Livre, LOJAILEAXE)
+    'ag[\u00ea e]ncias? (de |digital)?(marketing|publicidade|propaganda|comunica[\u00e7 c][\u00e3 a]o|digital|m[\u00ed i]dia|tr[\u00e1 a]fego|conte[\u00fa u]do|criativa|performance|growth|branding|inbound|lan[\u00e7 c]amento)',
+    'publicidade', 'propaganda', 'marketing', 'm[\u00ed i]dia paga',
     'tr[\u00e1 a]fego pago', 'social media', 'assessoria de (imprensa|marketing)',
     'inbound', 'performance digital', 'growth',
     // comercial e vendas
@@ -2238,6 +2569,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
   // o texto diz que a empresa VENDE isso, ou que ela COMPRA?
   const COMPRA_NAO_VENDE = /\b(busca|procura|quer|precisa|deseja|contratar|contrata[çc][ãa]o de|em busca de)\b/i;
+  // v25.1: escola que ensina marketing (PRO START, momento 1) não é agência
+  const ENSINA_NAO_VENDE = /\b(escola|curso|cursos|faculdade|ensino|aulas?|forma[çc][ãa]o profissional|idiomas?)\b/i;
 
   function ramoEhConcorrente(entry) {
     const m = entry.m2 || entry.m1 || {};
@@ -2255,6 +2588,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       if (!VENDE_CRESCIMENTO.test(t)) continue;
       // "busca uma agência de marketing" é cliente, não concorrente
       if (COMPRA_NAO_VENDE.test(t)) continue;
+      if (ENSINA_NAO_VENDE.test(t) && !/mentoria|consultoria/i.test(t)) continue;   // v25.1
       const trecho = (t.match(VENDE_CRESCIMENTO) || [''])[0];
       return { trecho, onde: t.slice(0, 90) };
     }
@@ -2710,11 +3044,18 @@ Cadastro é ponto de partida; investigação é a verdade.`;
             resolve({
               ms: Date.now() - t0,
               query,
-              itens: itens.map(x => ({
-                titulo: x.title || x.name || '',
-                trecho: x.snippet || x.description || '',
-                url: x.link || x.website || '',
-              })),
+              itens: itens.map(x => {
+                // v25.2: o quadro do Google Meu Negócio traz categoria, nota,
+                // avaliações, endereço e telefone — vale ouro e era descartado
+                if (x === d.knowledgeGraph) {
+                  const attrs = x.attributes ? Object.entries(x.attributes).map(([k, v]) => `${k}: ${v}`).join(' · ') : '';
+                  const nota = x.rating ? `nota ${x.rating}${x.ratingCount ? ' (' + x.ratingCount + ' avaliações)' : ''}` : '';
+                  return { titulo: `[Google Meu Negócio] ${x.title || ''}`,
+                    trecho: [x.type, x.description, nota, attrs].filter(Boolean).join(' · ').slice(0, 400),
+                    url: x.website || '' };
+                }
+                return { titulo: x.title || x.name || '', trecho: x.snippet || x.description || '', url: x.link || x.website || '' };
+              }),
             });
           } catch (e) { resolve({ erro: e.message, ms: Date.now() - t0 }); }
         },
@@ -2740,7 +3081,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       let m;
       while ((m = re.exec(texto)) !== null) {
         const c = (m[1] + m[2] + m[3] + m[4] + m[5]).replace(/\D/g, '');
-        if (c.length !== 14) continue;
+        if (c.length !== 14 || !cnpjValido(c)) continue;   // v25.1
         const casaPrefixo = alvo ? c.startsWith(alvo) : false;
         const citaNome = nucleo && normalizarTexto(texto).includes(nucleo);
         achados.push({ cnpj: c, casaPrefixo, citaNome, fonte: it.url, titulo: it.titulo,
@@ -2781,6 +3122,12 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const queries = [];
     // com prefixo do CNPJ é sempre seguro — ele é a prova de identidade
     if (px.length >= 4 && nucleo) queries.push(`"${nucleo}" ${px} CNPJ`);
+    // v25.1: negócio pequeno costuma estar no NOME DO DONO (casos HABIBI BEIRUT,
+    // CANTINA BEM ESTAR): o nome fantasia não acha o registro; o dono, sim.
+    const contatoCompleto = String(ex.nomeContato || '').replace(/\s+[l|\-–]\s+.*$/i, '').trim();
+    if (px.length >= 4 && contatoCompleto.split(/\s+/).length >= 2) {
+      queries.push(`"${contatoCompleto}" ${px} CNPJ`);
+    }
     // sem prefixo, só busca por nome se o nome identificar de verdade
     if (nucleoServe) queries.push(`${nucleo} ${cidade} CNPJ razão social`.replace(/\s+/g, ' ').trim());
     if (px.length >= 4) queries.push(`${px} CNPJ ${cidade}`.replace(/\s+/g, ' ').trim());
@@ -2933,8 +3280,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // Substituem os 3 checks + tags + valor endereçável. Cada box devolve um
   // veredito; o farol é a soma. Só concorrente confirmado veta sozinho.
   // ═══════════════════════════════════════════════════════════════
-  const CARGO_SOCIO   = /\bs[óo]cio|\bdono\b|propriet[áa]ri|fundador|\btitular\b|administrador|\bceo\b/i;
-  const CARGO_DIRETOR = /\bdiretor|\bpresidente\b|\bvp\b|vice.?presidente/i;
+  // v25.1: caso CLÍNICA ASSIN — "Sócia administrativa" não casava: a regra só
+  // conhecia o masculino. Agora sócia, dona, fundadora, empresária, administradora.
+  const CARGO_SOCIO   = /\bs[óo]ci[oa]s?\b|\bs[óo]ci[oa][- ]|\bdon[oa]\b|propriet[áa]ri|fundador|\btitular\b|administrador|empres[áa]ri[oa]\b|\bceo\b/i;
+  const CARGO_DIRETOR = /\bdiretor|\bpresident[ea]\b|\bvp\b|vice.?president[ea]/i;
   const CARGO_CLEVEL  = /\b(c[eftoim]o|cxo)\b|\bchief\b|\bsuperintendente/i;
   const CARGO_GERENTE = /\bgerente\b|\bhead\b|\bgestor/i;
   // Coordenador e supervisor NÃO têm alçada em nenhum porte — coordenam, não aprovam.
@@ -3008,6 +3357,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   function boxConcorrente(entry) {
     // v21.3: o ramo da própria empresa vale veto — vinha sendo ignorado
     const rc = ramoEhConcorrente(entry);
+    // v25.1: caso DOJO — a agência achada (DOJO.DO) não tem a contato no QSA, e a
+    // empresa dela é uma madeireira. Agência sem vínculo com o lead é suspeita, não veto.
+    const ofC = entry.oficial || {};
+    const rcDoOficial = rc && [ofC.cnae, ofC.razao_social, ofC.nome_fantasia].some(x => x && String(x).slice(0, 90) === rc.onde);
+    if (rc && ((rcDoOficial && oficialFraco(entry)) || (!entry.oficial && entry.cnpjSemVinculo))) {
+      return { cor: 'laranja', titulo: 'Concorrente', txt: 'agência achada pode ser homônima',
+        sub: `vende "${rc.trecho}", mas nada liga essa empresa ao lead — confirmar o que fazem`, pendente: 'concorrente' };
+    }
     if (rc) {
       return {
         cor: 'concorrente', titulo: 'Concorrente',
@@ -3025,10 +3382,22 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const identificada = m.empresa_existe === 'sim' || !!(entry.oficial && entry.oficial.cnpj);
 
     const porCnae = cnaeConcorrente(entry);
+    if (porCnae && oficialFraco(entry)) {   // v25.1: caso DOJO
+      return { cor: 'laranja', titulo: 'Concorrente', txt: 'CNPJ achado é de agência',
+        sub: `CNAE: ${porCnae} · o contato não é sócio dela — pode ser homônima`, pendente: 'concorrente' };
+    }
     if (porCnae) return { cor: 'concorrente', titulo: 'Concorrente', txt: 'É agência — não dê lance', sub: `CNAE: ${porCnae}`, veta: true };
     // CNAE existe e não é de agência → desmente a IA
     if (entry.oficial && entry.oficial.cnae && m.is_concorrente === true) {
       return { cor: 'amarelo', titulo: 'Concorrente', txt: 'IA diz agência, CNAE diz outra coisa', sub: String(entry.oficial.cnae).slice(0, 46), pendente: 'concorrente' };
+    }
+    // v25.1: caso RH CATANDUVA — a IA leu "dar visibilidade às vagas" como
+    // marketing; o ramo que ela mesma achou é recrutamento. Sem termo de
+    // concorrente no ramo, não veta: vira suspeita a confirmar.
+    const ramoAchado = soAfirmativo(String(m.ramo_real || m.ramo_aparente || ''));
+    if (m.is_concorrente === true && ramoAchado.length > 6 && !VENDE_CRESCIMENTO.test(ramoAchado)) {
+      return { cor: 'laranja', titulo: 'Concorrente', txt: 'suspeita de concorrente',
+        sub: `ramo achado: ${ramoAchado.slice(0, 60)} — confirmar o que fazem`, pendente: 'concorrente' };
     }
     if (m.is_concorrente === true) {
       if (!identificada) {
@@ -3061,9 +3430,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (vinc && m.is_concorrente !== true) {
       const p = vinc.provas[0];
       const mais = vinc.provas.length > 1 ? ` (+${vinc.provas.length - 1})` : '';
+      // v25.1: decisão da unidade — sinaliza com destaque, sem veto (CAUTION)
       return {
-        cor: 'amarelo', titulo: 'Concorrente',
-        txt: 'contato vem de agência',
+        cor: 'laranja', titulo: 'Concorrente',
+        txt: 'contato é sócio de agência',
         sub: `${p.txt}${mais}${vinc.dominioDiferente ? ' · domínio ≠ site do lead' : ''}`,
         pendente: 'concorrente',
       };
@@ -3146,6 +3516,12 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       };
     }
 
+    // v25.1: CNPJ achado que não prova ser do lead (GIRA PEÇAS, LOJAILEAXE, DOJO)
+    if (!temCnpj && entry.cnpjSemVinculo) {
+      return { cor: 'laranja', titulo: 'Empresa', txt: 'CNPJ achado não é do lead',
+        sub: `${fmtCnpj(entry.cnpjSemVinculo.cnpj)} · ${entry.cnpjSemVinculo.motivo} — pedir o CNPJ na abertura`,
+        pendente: 'empresa' };
+    }
     if (m.empresa_existe === 'sim') {
       const fo = contarFontes(entry);
 
@@ -3174,6 +3550,30 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       };
     }
     if (m.empresa_existe === 'nao') {
+      // v25.2: casos OESTE GOIANO, ELO3, PAGRISA — o Gemini estava fora (402) e a
+      // OpenAI respondeu sem internet. "Não existe" sem ter buscado é falso.
+      if (m._semBusca || (entry.m1 && entry.m1._semBusca && !entry.m2)) {
+        return { cor: 'amarelo', titulo: 'Empresa', txt: 'não verificada',
+          sub: 'a análise rodou sem busca na internet — analise de novo', pendente: 'empresa' };
+      }
+      // v25.2: o lead escreveu a atividade no lugar do nome
+      const nomeLead = (entry.extracted || {}).nomeEmpresa;
+      if (nomeEhDescricao(nomeLead)) {
+        return { cor: 'laranja', titulo: 'Empresa', txt: 'nome da empresa não informado',
+          sub: `o lead escreveu a atividade ("${String(nomeLead).slice(0, 40)}") — perguntar o nome e o CNPJ`, pendente: 'empresa' };
+      }
+      // v25.1: casos HABIBI BEIRUT e CANTINA BEM ESTAR — o momento 1 achou a
+      // empresa; o 2 virou "não existe" porque não achou o CNPJ pelo nome
+      // fantasia (o registro está no nome do dono). Não achar o CNPJ não prova
+      // que a empresa não existe. STOP só quando ninguém achou rastro nenhum.
+      const m1 = entry.m1 || {};
+      const fo0 = contarFontes(entry);
+      const rastro = m1.empresa_existe === 'sim' || (fo0.empresa && fo0.empresa.length > 0);
+      if (rastro) {
+        return { cor: 'laranja', titulo: 'Empresa', txt: 'existe · CNPJ não localizado',
+          sub: (fo0.empresa && fo0.empresa.length ? fo0.rotulo(fo0.empresa) + ' · ' : 'achada no momento 1 · ')
+            + 'pedir o CNPJ na abertura', pendente: 'empresa' };
+      }
       // v16.7: se o contato é sócio de uma empresa que a investigação achou,
       // existe rastro — a razão social pode ser outra que o nome fantasia.
       // Caso NO ALVO: card dizia "empresa não existe" e "dono de 1 empresa".
@@ -3209,7 +3609,45 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     return { cor: 'amarelo', titulo: 'Empresa', txt: 'parcial — investigar', pendente: 'empresa' };
   }
 
+  // v25.1: caso NEXFIELD — declarou R$ 51-70 mil, mas a Receita registra porte
+  // "DEMAIS" (acima de R$ 4,8 mi/ano) e há capital de R$ 1 mi. A alçada era
+  // medida pelo declarado. Com sinais de porte maior, mede pelo porte indicado.
+  function fatParaAlcada(entry) {
+    const ex = entry.extracted || {};
+    let f = ex.faturamentoMin || 0;
+    const porte = String((entry.oficial && entry.oficial.porte) || '');
+    if (/demais/i.test(porte)) f = Math.max(f, 400000);
+    if (entry.porteMaior && entry.porteMaior.sinais && entry.porteMaior.sinais.length) f = Math.max(f, 400000);
+    return f || ex.faturamentoMin;
+  }
+
+  // v25.1: o dono sempre visível — limitada pelo QSA, individual pela razão social
+  function donoDaEmpresa(of) {
+    if (!of) return null;
+    const nat = String(of.natureza || '');
+    if (/individual|empres[áa]rio/i.test(nat) && !/limitada|sociedade/i.test(nat)) {
+      const nome = String(of.razao_social || '').replace(/^[\d.\s/-]+/, '')
+        .replace(/\b(ME|MEI|EPP|EIRELI)\b\.?$/i, '').trim();
+      return nome ? { tipo: 'titular', nomes: [nome] } : null;
+    }
+    const q = (of.qsa || []).filter(x => x && x.nome);
+    if (!q.length) return null;
+    const adm = q.filter(x => /administrador/i.test(x.qualificacao || ''));
+    const resto = q.filter(x => !/administrador/i.test(x.qualificacao || ''));
+    return { tipo: 'socios', nomes: adm.concat(resto).map(x => x.nome), adm: adm.map(x => x.nome) };
+  }
+
+  // v25.2: caso THÁI MOTEL — o box dizia "é sócio" e ficava amarelo pedindo
+  // confirmação. Título e cor se contradiziam. Amarelo diz "provável sócio".
   function boxDecisor(entry) {
+    const b = boxDecisorBase(entry);
+    if (b && b.cor !== 'verde' && /^é s[óo]ci[oa]/i.test(String(b.txt || ''))) {
+      return Object.assign({}, b, { txt: String(b.txt).replace(/^é s[óo]ci([oa])/i, 'provável sóci$1') });
+    }
+    return b;
+  }
+
+  function boxDecisorBase(entry) {
     const m = entry.m2 || entry.m1 || {};
     const ex = entry.extracted;
 
@@ -3263,7 +3701,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (nat && nat.individual && nat.contatoEhDono && !entry.qsaMatch) {
       return {
         cor: 'verde', titulo: 'Decisor',
-        txt: 'é o dono · empresário individual',
+        txt: 'é o titular · empresário individual',   // v25.1: descreve o registro
         sub: `razão social é o nome dele (${String(nat.razao || '').slice(0, 34)})`,
       };
     }
@@ -3536,7 +3974,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const SUBORDINADO = /\b(analista|assistente|auxiliar|estagi[áa]ri\w*|aprendiz|trainee|operador\w*|atendente|vendedor\w*|secret[áa]ri\w*|recepcionista|jovem aprendiz)\b/i;
     if (cargo && SUBORDINADO.test(cargo)) {
       return { cor: 'vermelho', titulo: 'Decisor', txt: `${cargo} — não decide`,
-        sub: `o porte pede ${alcadaDoPorte(ex.faturamentoMin).rot}`, pendente: 'decisor' };
+        sub: `o porte pede ${alcadaDoPorte(fatParaAlcada(entry)).rot}`, pendente: 'decisor' };
     }
 
     // v18.1: o cargo às vezes vem com o nome de QUEM ocupa —
@@ -3562,12 +4000,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
     }
 
-    const alc = temAlcada(cargo, ex.faturamentoMin);
+    const fAlc = fatParaAlcada(entry);   // v25.1
+    const alc = temAlcada(cargo, fAlc);
     if (cargo && alc === true) return { cor: 'verde', titulo: 'Decisor',
       txt: cargo, sub: 'cargo tem alçada neste porte' };
-    if (cargo && alc === false) return { cor: 'amarelo', titulo: 'Decisor',
-      txt: `${cargo} — sem alçada`,
-      sub: `o porte pede ${alcadaDoPorte(ex.faturamentoMin).rot}`, pendente: 'decisor' };
+    if (cargo && alc === false) {
+      // v25.1: sem alçada não é beco sem saída — é a porta de entrada
+      const dono = donoDaEmpresa(entry.oficial);
+      return { cor: 'amarelo', titulo: 'Decisor',
+        txt: `${cargo} — porta de entrada`,
+        sub: `o porte pede ${alcadaDoPorte(fAlc).rot}`
+          + (dono ? ` · ${dono.tipo === 'titular' ? 'titular' : 'sócios'}: ${dono.nomes.slice(0, 2).join(', ')}` : '')
+          + ' — confirmar quem decide', pendente: 'decisor' };
+    }
     if (par) return { cor: 'amarelo', titulo: 'Decisor', txt: `possível familiar · ${par.sobrenomes}`, sub: 'confirmar relação', pendente: 'decisor' };
     if (evRuim) return { cor: 'amarelo', titulo: 'Decisor', txt: 'prova inválida', sub: evRuim.tipo, pendente: 'decisor' };
 
@@ -3582,6 +4027,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       return { cor: 'amarelo', titulo: 'Decisor',
         txt: 'provável dono',
         sub: 'o nome da empresa vem do nome dele — confirme na abertura',
+        pendente: 'decisor' };
+    }
+    // v25.1: caso GIRA PEÇAS — o dono não aparecia em lugar nenhum
+    const dono = donoDaEmpresa(entry.oficial);
+    if (dono) {
+      return { cor: 'amarelo', titulo: 'Decisor', txt: 'contato não é o dono',
+        sub: `${dono.tipo === 'titular' ? 'o titular é' : 'sócios:'} ${dono.nomes.slice(0, 2).join(', ')}`
+          + ` — confirmar o papel de ${(ex.nomeContato || 'contato').split(' ')[0]}`,
         pendente: 'decisor' };
     }
     return { cor: 'amarelo', titulo: 'Decisor',
@@ -3605,7 +4058,18 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     //   a) CNAE e atividade investigada caem em buckets diferentes
     //   b) a própria IA apontou a divergência nas contradições (foi o que houve)
     const bCnae = cnae ? classificarMargem(cnae) : null;
-    const bIA = ramoIA ? classificarMargem(ramoIA) : null;
+    // v25.1: caso NEXFIELD — "insumos agrícolas ... e tecnologia para o campo"
+    // virava software (alta) pela palavra "tecnologia". A margem sai da
+    // atividade PRINCIPAL (a primeira citada); com CNAE, um texto que não
+    // classifica na atividade principal não abre divergência.
+    const principal = ramoIA ? String(ramoIA).split(/[,;(]|\s+e\s+(?=[a-záéíóúâêôãõç])/i)[0].trim() : '';
+    const bPrincipal = principal.length > 4 ? classificarMargem(principal) : null;
+    let bIA = bPrincipal || (ramoIA && !cnae ? classificarMargem(ramoIA) : null);
+    if (bCnae && bIA && bCnae.nome !== bIA.nome && ramoIA) {
+      const partes = String(ramoIA).split(/[,;()]|\s+e\s+/i).map(x => x.trim()).filter(x => x.length > 4);
+      if (partes.some(x => { const c = classificarMargem(x); return c && c.nome === bCnae.nome; })) bIA = bCnae;
+    }
+    entry.margemDivergente = null;   // v25.1: não herdar a divergência de um render antigo
 
     // v16.10: quando o ramo investigado REPETE o texto do CNAE (com um adendo
     // entre parênteses, por exemplo), não há divergência nenhuma — é a mesma
@@ -3660,6 +4124,16 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const fatContradiz = !!(cp && cp.checou && cp.coerente === false);
 
     let r = cruzarMatriz(ramo, ex.faturamentoMin, ramoVerif, fatVerif, fatContradiz);
+    // v25.1: decisão da unidade — abaixo de R$ 100 mil continua no ICP (amarelo,
+    // confirmar o faturamento). Vira verde só com sinais de porte maior achados
+    // pela investigação; nunca vermelho só pelo faturamento.
+    if (ex.faturamentoMin && ex.faturamentoMin < 100000 && r.marg) {
+      const pm = entry.porteMaior && entry.porteMaior.sinais && entry.porteMaior.sinais.length;
+      r = Object.assign({}, r, pm
+        ? { cor: 'verde', curto: 'abaixo de R$ 100k declarado, com sinais de porte maior' }
+        : { cor: 'amarelo', curto: 'abaixo de R$ 100k/mês — confirmar o faturamento',
+            motivo: 'abaixo de R$ 100k/mês — no ICP, confirmar o faturamento' });
+    }
     // v25.0: faturamento muito acima do porte (ex.: 33x) não deixa a margem verde
     if (cp && cp.severidade === 'risco_icp' && r.cor === 'verde') {
       r = Object.assign({}, r, { cor: 'amarelo', curto: 'faturamento pode estar fora do ICP',
@@ -3685,6 +4159,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
     }
 
+    // v25.1: abaixo de R$ 100k que ficou verde é por sinal de porte maior — diz isso
+    if (ex.faturamentoMin && ex.faturamentoMin < 100000 && r.cor === 'verde' && entry.porteMaior && entry.porteMaior.sinais) {
+      sub = `declarou abaixo de R$ 100k, mas há sinais de porte maior: ${entry.porteMaior.sinais.slice(0, 2).join(' · ')}`;
+    }
     // v24.7: a divergência com o CNAE vira nota — informação pro SDR
     if (notaCnae) sub = [sub, notaCnae].filter(Boolean).join(' · ');
 
@@ -3707,7 +4185,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       const mot = { empresa: 'empresa não existe', margem: bs.margem.motivo, decisor: 'decisor não encontrado' };
       return { cor: 'vermelho', rot: 'STOP', luz: '🔴', motivo: mot[k], boxes: bs };
     }
-    const am = Object.entries(bs).filter(([, b]) => b.cor === 'amarelo');
+    const am = Object.entries(bs).filter(([, b]) => b.cor === 'amarelo' || b.cor === 'laranja');   // v25.1
     if (am.length) return { cor: 'amarelo', rot: 'CAUTION', luz: '🟡', motivo: am.map(([x]) => x).join(' · '), boxes: bs };
     return { cor: 'verde', rot: 'GO', luz: '🟢', motivo: null, boxes: bs };
   }
@@ -3725,6 +4203,22 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   };
 
   const MARGEM_SEGMENTO = [
+    // v25.1: 17 dos 103 leads do histórico ficavam "fora da régua". Margens
+    // validadas pela unidade. Vêm primeiro para não cair em regra genérica.
+    { re: /(com[ée]rcio|distribui|varej|atacad|dep[óo]sito|adega|conveni[êe]ncia)[^,;]{0,40}bebid|distribuidora de bebid|\badega\b|cacha[çc]a/i, b: 'baixa', nome: 'bebidas (comércio)' },
+    { re: /(com[ée]rcio|varej|atacad|loja)[^,;]{0,40}(tecido|aviamento|armarinho|embalage|bomboni[eè]r|tabacaria|headshop|artigos religiosos|outros produtos)|\btabacaria\b|bomboni[eè]r/i, b: 'baixa', nome: 'varejo especializado' },
+    { re: /res[íi]duos|sucata|recicl[áa]ve|reciclagem|aparas/i, b: 'baixa', nome: 'resíduos e reciclagem' },
+    // v25.2: THÁI MOTEL (CNAE "Motéis") e PAGRISA (açúcar e álcool)
+    { re: /\bmot[ée]is\b|\bmotel\b/i, b: 'media', nome: 'turismo / hotelaria' },
+    { re: /a[çc][úu]car|\b[áa]lcool\b|etanol|\busina\b|sucroenerg|sucroalcool/i, b: 'baixa', nome: 'agroindústria (commodity)' },
+    // v25.1: caso EMPÓRIO KIDS — "comércio varejista de confecções" caía em indústria
+    { re: /(com[ée]rcio|varej|loja|boutique)[^,;]{0,30}(confec|vestu[áa]ri|roupa|moda|cal[çc]ad)/i, b: 'baixa', nome: 'varejo não-alimentar' },
+    { re: /\bbar(es)?\b|botequim|\bpub\b|choperia|petiscaria/i, b: 'media', nome: 'food service' },
+    { re: /marmoraria|m[áa]rmore|granito/i, b: 'media', nome: 'marmoraria' },
+    { re: /eventos|loca[çc][ãa]o de espa[çc]o|espa[çc]o para (festas|eventos)|ch[áa]cara|sal[ãa]o de festas|buffet/i, b: 'media', nome: 'eventos' },
+    { re: /\bcanil\b|cria[çc][ãa]o (e venda )?de (c[ãa]es|gatos|cachorros?|filhotes|beagles?|bulldogs?|animais dom)/i, b: 'media', nome: 'criação de animais' },
+    { re: /funer[áa]ri|servi[çc]os? funer|cemit[ée]ri|crema[çc]/i, b: 'alta', nome: 'funerária' },
+    { re: /\bmentoria\b|mentor(ia)? (profissional|de carreira)|coaching/i, b: 'alta', nome: 'mentoria / desenvolvimento' },
     // ─── ALTA (>50%)
     // v17.6: SCD, fintech de crédito e factoring apareceram no histórico e não
     // classificavam. Intermediação financeira tem margem alta e ticket alto.
@@ -3815,7 +4309,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (!ramo) return null;
     // v17.6: "não há evidências de clínica médica" não é uma clínica
     if (ehNegacao(ramo)) return null;
-    let limpo = soAfirmativo(ramo);
+    // v25.1: "intermediação ... exceto imobiliários" classificava imobiliário
+    let limpo = soAfirmativo(String(ramo).replace(/\bexceto\b[^.;]*/gi, ' '));
 
     // v17.13: o parêntese costuma listar CLIENTES ou variações, não o negócio.
     // "Fabricação de uniformes profissionais (segurança, hotelaria/cozinha/
@@ -4672,6 +5167,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     .v4-box.verde .v4-box-lbl     { color: #4ADE80; }
     .v4-box.amarelo   { background: rgba(217,119,6,.16); border: 1px solid rgba(217,119,6,.32); }
     .v4-box.amarelo .v4-box-lbl   { color: #FBBF24; }
+    .v4-box.laranja   { background: rgba(234,88,12,.18); border: 1px solid rgba(234,88,12,.45); }
+    .v4-box.laranja .v4-box-lbl   { color: #FB923C; }
     .v4-box.vermelho  { background: rgba(204,20,20,.16); border: 1px solid rgba(204,20,20,.34); }
     .v4-box.vermelho .v4-box-lbl  { color: #F87171; }
     .v4-box.concorrente { background: rgba(204,20,20,.34); border: 1px solid rgba(204,20,20,.6); }
@@ -5927,6 +6424,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     s = s.replace(/^[\p{Emoji_Presentation}\p{Extended_Pictographic}✅✕⚠🚨🟢🟡🔴⏳↺↯◉⚡✓#•·\-–—\s]+/u, '').trim();
     if (s.length < 2) return false;
     if (/^#?\d+$/.test(s)) return false;
+    // v25.1: o ⌘A pegou o próprio painel e um lead virou "ex.nomeEmpresa || '',"
+    if (/\|\||&&|=>|\bex\.|\bfunction\b|[{};`]|''|""/.test(s)) return false;
     if ((s.match(/[a-zA-ZÀ-ÿ]/g) || []).length < 2) return false;   // "R&F" passa
 
     // rótulos e textos da UI do próprio script
@@ -6045,6 +6544,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       if (!m || !m[1]) return null;
       const v = m[1].trim();
       if (!v || /^[\*\-\s]+$/.test(v)) return null;
+      // v25.1: caso LE DISTRIBUIDORA — estado vazio, e o "Cidade:" da linha de
+      // baixo virou o estado; caso TERROIR — cargo vazio virou "Telefone:".
+      // Valia só para o formato sem dois-pontos; agora vale para os dois.
+      if (new RegExp(`^\\s*(?:${ROTULOS_RE})\\s*:?\\s*$`, 'i').test(v)) return null;
       // valor truncado pelo card da grade ("Estruturação ...") não serve
       if (/^\.{3}$|^…$/.test(v)) return null;
       return v;
@@ -6058,7 +6561,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       // v14.9: no card da grade o nome vem depois de "Lead" e "Visualizado".
       // Antes eu olhava só a PRIMEIRA linha e desistia.
       const linhas = text.split('\n').map(l => l.trim()).filter(Boolean);
-      const lixo = /^(faturamento|segmento|pa[ií]s|documento|nome|e-?mail|cargo|telefone|tipo|urg|canal|data|denunciar|lead|visualizado|detalhes|valor|arrematador|ver no crm|adquirido|enriquecimento|descri[çc][ãa]o|estado|cidade|observa)/i;
+      // v25.1: o card do leilão também traz "1 lances" e "Você está na frente"
+      const lixo = /^(faturamento|segmento|pa[ií]s|documento|nome|e-?mail|cargo|telefone|tipo|urg|canal|data|denunciar|lead|visualizado|detalhes|valor|arrematador|ver no crm|adquirido|enriquecimento|descri[çc][ãa]o|estado|cidade|observa|\d+\s+lances?$|voc[êe] est[áa]|lances?$)/i;
       const cand = linhas.find(l => l.length > 2 && l.length < 100 && !lixo.test(l)
         && !/^r\$\s|^\d{2}:\d{2}|^\d+$/i.test(l)
         && nomeEmpresaPlausivel(l));          // v15.2: aplicar de verdade
@@ -6382,7 +6886,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         else t = await callChatSearch(sys, user, key, timeout, step.model, false);
 
         GM_setValue('v4_openai_search_ok', `${step.api}:${step.model}`);
-        if (step.api === 'plain') console.warn('[V4] ⚠️ rodando SEM busca web — só conhecimento do modelo');
+        if (step.api === 'plain') {
+          console.warn('[V4] ⚠️ rodando SEM busca web — só conhecimento do modelo');
+          if (t && typeof t === 'object') t.semBusca = true;   // v25.2
+        }
         return t;   // {texto, uso}
       } catch (e) {
         falhas.push(e.message);
@@ -6507,14 +7014,20 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     }
     if (!qsa || !qsa.length || !nomeContato) return null;
     const alvo = normNome(nomeContato);
-    const partesC = partesNome(nomeContato);
+    // v25.2: caso THÁI MOTEL — "Jose Carlos Martins Jr" × "JOSE CARLOS MARTINS
+    // JUNIOR" no QSA. "Jr" não casava, e o box ficou "match parcial".
+    const sufixo = (arr) => arr.map(p => /^(jr|junior|júnior)$/.test(p) ? 'junior' : (/^(f[oº]|filho)$/.test(p) ? 'filho' : p));
+    const partesC = sufixo(partesNome(nomeContato));
     if (!partesC.length) return null;
+    // "Jr" curto some no partesNome — repõe como "junior" para o nome bater inteiro
+    if (/\bjr\b\.?|\bj[uú]nior\b/i.test(String(nomeContato || '')) && !partesC.includes('junior')) partesC.push('junior');
+    if (/\bf[oº]\b|\bfilho\b/i.test(String(nomeContato || '')) && !partesC.includes('filho')) partesC.push('filho');
 
     const candidatos = [];
     for (const s of qsa) {
       const nomeS = normNome(s.nome || s.nome_socio || '');
       if (!nomeS) continue;
-      const partesS = partesNome(nomeS);
+      const partesS = sufixo(partesNome(nomeS));
       if (!partesS.length) continue;
 
       const comuns = partesC.filter(p => partesS.includes(p));
@@ -6523,7 +7036,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       const primeiroBate = partesS[0] === partesC[0];
 
       let tipo = null, base = '';
-      if (nomeS === alvo) {
+      // v25.2: "Jr" = "JUNIOR" — mesmas partes, mesma quantidade, é o mesmo nome
+      if (nomeS === alvo || (todasPresentes && partesC.length === partesS.length && partesC.length >= 2)) {
         tipo = 'exato'; base = 'nome idêntico ao do QSA';
       } else if (todasPresentes && partesC.length >= 2) {
         // "Eugenio Leite" ⊂ "Bruno Eugenio Leite da Silva"
@@ -6563,7 +7077,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // comuns — mesmo sendo o único sócio, não dá pra afirmar que é a pessoa.
     let confianca;
     if (ambiguo) confianca = 'ambigua';
-    else if (melhor.tipo === 'exato') confianca = (melhor.distintivo || socioUnico) ? 'alta' : 'media';
+    // v25.2: nome completo idêntico (3+ partes) no QSA DESTA empresa é a pessoa —
+    // a cautela com nomes comuns vale para achar alguém no Brasil, não num QSA fixo
+    else if (melhor.tipo === 'exato') confianca = (melhor.distintivo || socioUnico || partesC.length >= 3) ? 'alta' : 'media';
     else if (melhor.tipo === 'contido' && melhor.distintivo && (socioUnico || individual || melhor.primeiroBate)) confianca = 'alta';
     // v16.13: sócio ÚNICO + primeiro nome batendo + nome inteiro contido é forte
     // mesmo com partes comuns. Caso TOTAL HOME: "Tiago Melo" contido em
@@ -6921,6 +7437,11 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
         evento: evento || 'analise',
         usuario: nomeUsuario(),
         versao: VERSION,
+        // v25.1: onde está o tempo de cada SDR (Teoria das Restrições no nosso processo)
+        origem_analise: (entry.tempos && entry.tempos.origem) || '',
+        seg_apareceu_ate_pedir: entry.tempos && entry.tempos.apareceu ? Math.round((entry.tempos.pedido - entry.tempos.apareceu) / 1000) : '',
+        seg_abriu_ate_pedir: entry.tempos && entry.tempos.aberto ? Math.round((entry.tempos.pedido - entry.tempos.aberto) / 1000) : '',
+        seg_pedir_ate_farol: entry.tempos && entry.tempos.farol ? Math.round((entry.tempos.farol - entry.tempos.pedido) / 1000) : '',
         quando: new Date().toISOString(),
         empresa: ex.nomeEmpresa || '',
         contato: ex.nomeContato || '',
@@ -7095,6 +7616,20 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     return j;
   }
 
+  // v25.2: disjuntor do Gemini — duas falhas seguidas (ou erro de pagamento/chave)
+  // pausam o Gemini por 10 minutos. Nesse tempo a análise vai direto pela OpenAI,
+  // sem esperar o erro do Gemini a cada lead. Depois ele é testado de novo.
+  function geminiPausado() { return Date.now() < Number(GM_getValue('v4_gemini_pausa_ate', 0) || 0); }
+  function geminiOk() { GM_setValue('v4_gemini_falhas', 0); GM_setValue('v4_gemini_pausa_ate', 0); }
+  function geminiFalhou(msg) {
+    const n = Number(GM_getValue('v4_gemini_falhas', 0) || 0) + 1;
+    GM_setValue('v4_gemini_falhas', n);
+    if (n >= 2 || /402|401|403|quota|billing|payment|pagamento|api key/i.test(String(msg || ''))) {
+      GM_setValue('v4_gemini_pausa_ate', Date.now() + 10 * 60 * 1000);
+      console.warn('[V4] Gemini pausado por 10 min:', msg);
+    }
+  }
+
   async function executarIA(prompt, user, timeout, tag, opts) {
     const gk = GM_getValue('v4_gemini_key', '');
     const ok = GM_getValue('v4_openai_key', '');
@@ -7106,9 +7641,19 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
       const j = limparPalpites(extractJson(texto)); j._src = 'gemini'; j._uso = uso; return j;
     };
     const viaOpenAI = async () => {
-      const { texto, uso } = normalizarResposta(await callOpenAISearch(prompt, user, ok, timeout));
+      const bruto = await callOpenAISearch(prompt, user, ok, timeout);
+      const { texto, uso } = normalizarResposta(bruto);
       registrarUso('gpt', uso, tag);
-      const j = limparPalpites(extractJson(texto)); j._src = 'gpt'; j._uso = uso; return j;
+      const j = limparPalpites(extractJson(texto)); j._src = 'gpt'; j._uso = uso;
+      if (bruto && bruto.semBusca) j._semBusca = true;   // v25.2
+      return j;
+    };
+    // v25.2: no modo rápido os resultados do Serper já estão no prompt — a OpenAI
+    // julga como o Gemini faria, sem precisar buscar (casos OESTE GOIANO, ELO3)
+    const viaOpenAIComResultados = async () => {
+      const { texto, uso } = normalizarResposta(await callOpenAI(prompt, user, ok, timeout));
+      registrarUso('gpt', uso, tag);
+      const j = limparPalpites(extractJson(texto)); j._src = 'gpt⚡'; j._uso = uso; j._fallback = true; return j;
     };
 
     // race opcional: paga os dois pra ganhar 2-3s. Só se ligado no painel.
@@ -7118,14 +7663,23 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     }
 
     const erros = [];
-    if (gk) {
-      try { return await viaGemini(); }
+    // v25.2: Gemini que acabou de falhar é pulado por 10 min (ex.: 402, sem crédito)
+    const pausado = geminiPausado();
+    if (gk && !(pausado && ok)) {
+      try { const r = await viaGemini(); geminiOk(); return r; }
       catch (e) {
         erros.push('gemini: ' + e.message);
+        geminiFalhou(e.message);
         console.warn(`[V4] ${tag}: gemini falhou (${e.message}) — tentando OpenAI`);
       }
+    } else if (gk) {
+      erros.push('gemini: pausado após falhas seguidas');
     }
-    // v24.0: no modo rápido a OpenAI não entra — quem assume é a busca completa
+    if (ok && opts && opts.semBusca) {
+      try { return await viaOpenAIComResultados(); }
+      catch (e) { erros.push('openai: ' + e.message); }
+    }
+    // v24.0: no modo rápido a OpenAI de busca não entra — quem assume é a busca completa
     if (ok && !(opts && opts.soGemini)) {
       try { const r = await viaOpenAI(); r._fallback = !!gk; return r; }
       catch (e) { erros.push('openai: ' + e.message); }
@@ -7335,6 +7889,41 @@ RETORNE APENAS JSON:
   }
 
   // O que buscar, por momento. Puro — dá pra testar sem rede.
+  // v25.2: caso "AGRONEGÓCIO. PECUÁRIA DE LEITE E CORTE." — o lead escreveu a
+  // atividade no campo da empresa. Buscar isso como nome não acha nada, e o
+  // card concluía "não existe".
+  const SETOR_RE = /^(agro\w*|agronegocio|pecuaria|leite|corte|gado|bovin\w*|comercio|servicos?|industria\w*|construc\w*|reformas?|consultoria|transportes?|logistica|alimentos?|saude|beleza|estetica|educacao|ensino|imoveis|imobiliari\w*|varejo|atacado|tecnologia|vendas|negocios?|empresa|loja|eventos|turismo|vestuario|moda|confeccao|agricultura|agricola|rural|fazenda|produtor\w*|autonomo|prestador\w*|geral|diversos)$/;
+  function nomeEhDescricao(nome) {
+    const toks = normalizarTexto(String(nome || '')).replace(/[^a-z\s]/g, ' ').split(/\s+/)
+      .filter(t => t.length > 2 && !/^(dos|das|para|com|que|sem)$/.test(t));
+    return toks.length >= 2 && toks.every(t => SETOR_RE.test(t) || PALAVRA_DE_RAMO.test(t));
+  }
+
+  // v25.2: caso "Abuelhaj" × "Abu-El-Haj" — sobrenome árabe escrito junto.
+  function variantesDoNome(contato) {
+    const partes = String(contato || '').trim().split(/\s+/);
+    const out = new Set();
+    partes.forEach((t, i) => {
+      const n = normalizarTexto(t).replace(/[^a-z-]/g, '');
+      if (n.includes('-')) { const junto = n.replace(/-/g, ''); out.add(partes.map((x, j) => j === i ? junto : x).join(' ')); return; }
+      // só quando o nome COMEÇA com a partícula árabe (abu, abou, ibn) — senão
+      // "Alberto" virava "Al-berto"
+      if (!/^(abu|abou|ibn)/.test(n)) return;
+      const pedacos = []; let resto = n;
+      for (let k = 0; k < 3; k++) {
+        const m = resto.match(/^(abu|abou|ibn|el|al)(.{3,})$/);
+        if (!m) break;
+        pedacos.push(m[1]); resto = m[2];
+      }
+      if (pedacos.length) {
+        pedacos.push(resto);
+        out.add(partes.map((x, j) => j === i ? pedacos.join('-') : x).join(' '));
+        out.add(partes.map((x, j) => j === i ? pedacos.join(' ') : x).join(' '));
+      }
+    });
+    return [...out];
+  }
+
   function planoDeBuscas(ex, momento) {
     ex = ex || {};
     const nome = String(ex.nomeEmpresa || '').trim();
@@ -7358,8 +7947,24 @@ RETORNE APENAS JSON:
       if (t && !q.some(x => x.q === t)) q.push({ id, q: t });
     };
 
+    // v25.2: nome-descrição → a investigação procura a PESSOA
+    const partesC = contato.split(/\s+/).filter(Boolean);
+    const curto = partesC.length >= 3 ? `${partesC[0]} ${partesC[1]}` : '';
+    const variantes = variantesDoNome(contato);
+    if (contato && nomeEhDescricao(nome)) {
+      add('pessoa', `"${contato}" ${cid} ${uf}`);
+      add('pessoa_ramo', `"${contato}" ${nome.replace(/[.]/g, ' ')}`);
+      if (variantes[0]) add('pessoa_grafia', `"${variantes[0]}" ${uf}`);
+      else if (curto) add('pessoa_curto', `"${curto}" ${cid || uf}`);
+      add('linkedin', `site:linkedin.com/in "${contato}"`);
+      return q.slice(0, momento === 'M2' ? 6 : 4);
+    }
+
     if (momento === 'M2') {
-      if (contato) add('socios', `"${contato}" sócio CNPJ ${uf}`);
+      if (variantes[0]) add('socios_grafia', `"${variantes[0]}" sócio CNPJ ${uf}`);   // v25.2
+      if (curto && parteDistintiva(normalizarTexto(partesC[0]))) add('nome_curto', `"${curto}" ${cid || uf}`);   // v25.2
+      // v25.1: com um nome só, "Stephanie sócio CNPJ" só traz homônimos
+      if (contato && contato.split(/\s+/).length >= 2) add('socios', `"${contato}" sócio CNPJ ${uf}`);
       add('cadastro', `site:casadosdados.com.br OR site:econodata.com.br ${termo} ${uf}`);
       add('linkedin_empresa', `site:linkedin.com/company ${termo}`);
       if (junto.length > 3) add('redes', `${junto} instagram OR facebook`);
@@ -7369,7 +7974,10 @@ RETORNE APENAS JSON:
       return q.slice(0, 6);
     }
 
-    add('empresa', `${termo} ${cid} ${uf}`);
+    // v25.2: o nome declarado inteiro, entre aspas, primeiro (caso NA ILHA BEACH
+    // SPORTS: o Google acha tudo pelo nome exato; o núcleo diluía a busca)
+    if (termo.startsWith('"')) add('empresa', `${termo} ${cid} ${uf}`);
+    else add('empresa', `"${nome.replace(/["]/g, '')}" ${uf}`);
     if (contato) add('cruzado', `"${contato}" ${termo}`);
     if (contato) add('linkedin', `site:linkedin.com/in "${contato}" ${termo}`);
     if (ei.corporativo && ei.dominioFull) add('dominio', `site:${ei.dominioFull}`);
@@ -7424,7 +8032,7 @@ RETORNE APENAS JSON:
     const receita = ex && ex._receita ? String(ex._receita.cnpj || '').replace(/\D/g, '') : '';
     const cnpjOk = c => {
       const d = String(c || '').replace(/\D/g, '');
-      return d.length === 14 && (d === receita || soDig.includes(d));
+      return d.length === 14 && cnpjValido(d) && (d === receita || soDig.includes(d));   // v25.1
     };
     const dominio = u => normalizarTexto(String(u || '')).replace(/^https?:\/\//, '')
       .replace(/^www\./, '').split(/[\/?#\s]/)[0];
@@ -7596,6 +8204,139 @@ ${semInternos(m1)}`;
       t = t.split('\n').filter(l => !/PORTE PODE SER MAIOR/i.test(l)).join('\n');
     }
     return t.replace(/\n{3,}/g, '\n\n');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // DOSSIÊ DE HANDOFF SDR ➜ CLOSER (v25.1)
+  //
+  // Modelo validado pela unidade (exemplo TERROIR PANTANAL): 1. ficha do lead
+  // com tudo o que a pesquisa levantou, 2. leitura, 3. handoff que o SDR
+  // preenche na ligação. A ficha e o handoff são montados AQUI, com os dados —
+  // a IA escreve só a leitura. Assim nenhum dado da ficha é inventado e campo
+  // procurado e não achado aparece como "não achado".
+  // ═══════════════════════════════════════════════════════════════
+  function fichaDoLead(entry) {
+    const ex = entry.extracted || {};
+    const of = entry.oficial || null;
+    const m = entry.m2 || entry.m1 || {};
+    const doisM = k => (entry.m2 && entry.m2[k]) || (entry.m1 && entry.m1[k]) || null;
+    const bs = entry.boxes || {};
+    const f = entry.farol || {};
+    const ic = c => ({ verde: '🟢', amarelo: '🟡', laranja: '🟠', vermelho: '🔴', concorrente: '🚨' })[c] || '⚪';
+    const NA = 'não achado';
+    const L = [];
+    const lin = (rot, val) => L.push(`  ${String(rot).padEnd(18)}${val || NA}`);
+    const sec = (t) => L.push('', t);
+
+    L.push('═'.repeat(60));
+    L.push(` ${String(ex.nomeEmpresa || 'EMPRESA NÃO IDENTIFICADA').toUpperCase()}   ${f.luz || ''} ${f.rot || ''}`);
+    L.push(' ' + ['concorrente', 'empresa', 'decisor', 'margem'].map(k =>
+      `${ic((bs[k] || {}).cor)} ${k[0].toUpperCase() + k.slice(1)}`).join('   '));
+    if (f.motivo) L.push(` ${f.motivo}`);
+    L.push('═'.repeat(60));
+    L.push('', '━━ 1. FICHA DO LEAD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // 👤 dono e decisão
+    sec('👤 DONO E DECISÃO');
+    const dono = donoDaEmpresa(of);
+    lin(dono && dono.tipo === 'titular' ? 'Titular' : 'Sócios (Receita)', dono ? dono.nomes.slice(0, 6).join(' · ') : (of ? NA : 'sem CNPJ confirmado'));
+    const qm = entry.qsaMatch;
+    const ehDono = (qm && (qm.confianca === 'alta' || qm.confianca === 'media')) || (entry.natureza && entry.natureza.contatoEhDono);
+    lin('Contato', ex.nomeContato ? `${ex.nomeContato}${of ? (ehDono ? ' · é sócio/titular' : ' · não está entre os sócios') : ''}` : NA);
+    lin('Papel achado', m.decisor_papel ? `${m.decisor_papel}${m.decisor_fonte ? ' (' + m.decisor_fonte + ')' : ''}` : 'nenhum — papel a confirmar');
+    lin('Alçada esperada', alcadaDoPorte(fatParaAlcada(entry)).rot);
+    const oe = entry.outrasEmpresas && entry.outrasEmpresas.lista;
+    if (oe && oe.length) lin('Outras empresas', oe.slice(0, 3).map(e => `${e.nome}${e.cidade ? ' (' + e.cidade + ')' : ''}`).join(' · '));
+    if (entry.parentesco) lin('Família', `sobrenome em comum com sócio: ${entry.parentesco.sobrenomes}`);
+
+    // 🏢 empresa
+    sec('🏢 EMPRESA (Receita)');
+    if (of) {
+      lin('CNPJ', `${fmtCnpj(of.cnpj)} · ${of.situacao || ''}`);
+      lin('Razão / fantasia', `${of.razao_social || NA} · ${of.nome_fantasia || '—'}`);
+      const meses = idadeEmpresaMeses(of.abertura);
+      lin('Abertura', of.abertura ? `${String(of.abertura).slice(0, 4)}${meses != null ? ' · ' + (meses < 24 ? meses + ' meses' : Math.floor(meses / 12) + ' anos') : ''}` : NA);
+      lin('Natureza', of.natureza);
+      lin('Porte', of.porte);
+      lin('Capital social', of.capital_social ? `R$ ${Number(of.capital_social).toLocaleString('pt-BR')}` : NA);
+      lin('CNAE', of.cnae);
+      lin('Cidade', of.municipio ? `${of.municipio}/${of.uf || ''}` : NA);
+    } else {
+      lin('CNPJ', entry.cnpjSemVinculo
+        ? `não confirmado · achado ${fmtCnpj(entry.cnpjSemVinculo.cnpj)}, sem vínculo com o lead`
+        : 'não confirmado — pedir na ligação');
+    }
+    if (entry.cnpjAnterior) lin('CNPJ anterior', `${fmtCnpj(entry.cnpjAnterior.cnpj)} · ${String(entry.cnpjAnterior.situacao || '').toLowerCase()}`);
+    if (entry.cnpjTrocado) lin('CNPJ trocado', `${fmtCnpj(entry.cnpjTrocado.de)} ➜ ${fmtCnpj(entry.cnpjTrocado.para)} · ${entry.cnpjTrocado.motivo}`);
+
+    // 🌐 presença online
+    sec('🌐 PRESENÇA ONLINE');
+    lin('Site', doisM('site'));
+    lin('Instagram', doisM('instagram'));
+    lin('LinkedIn', doisM('linkedin_empresa') || doisM('linkedin_contato'));
+    if (doisM('funcionarios_linkedin')) lin('Funcionários', doisM('funcionarios_linkedin'));
+    const vagas = (entry.m2 && entry.m2.vagas_abertas) || [];
+    lin('Vagas abertas', vagas.length ? vagas.slice(0, 3).map(v => typeof v === 'string' ? v : (v && (v.titulo || v.cargo)) || '').filter(Boolean).join(' · ') : 'nenhuma achada');
+
+    // 📊 porte e faturamento
+    sec('📊 PORTE E FATURAMENTO');
+    const cp = entry.coerenciaPorte;
+    lin('Declarado', `${ex.faturamento || NA}${cp && cp.checou ? (cp.coerente ? ' ✔ cabe no porte da Receita' : ' ✖ não bate com a Receita') : ''}`);
+    if (cp && cp.checou && !cp.coerente && cp.nota) lin('Leitura', cp.nota);
+    const pm = entry.porteMaior && entry.porteMaior.sinais;
+    if (pm && pm.length) lin('⚡ Porte maior', pm.join(' · '));
+
+    // 🧭 ramo e margem
+    sec('🧭 RAMO E MARGEM');
+    lin('Ramo real', (entry.m2 && entry.m2.ramo_real) || m.ramo_aparente);
+    const div = entry.margemDivergente;
+    lin('CNAE', of && of.cnae ? `${of.cnae}${div ? ' · diverge da atividade achada' : ' ✔ confere'}` : NA);
+    if (ex.segmento) lin('Segmento marcado', `${ex.segmento} (formulário — vale o investigado)`);
+    const bm = bs.margem || {};
+    lin('Margem', `${bm.txt || NA}${bm.sub ? ' · ' + bm.sub : ''}`);
+
+    // 📇 cadastro
+    sec('📇 CADASTRO DO LEAD');
+    lin('Contato', ex.nomeContato);
+    lin('Cargo', ex.cargo || 'não informado');
+    const dom = String(ex.email || '').split('@')[1] || '';
+    const generico = /gmail|hotmail|outlook|yahoo|icloud|live|bol|uol|terra/i.test(dom);
+    lin('E-mail', dom ? `${generico ? 'pessoal' : 'corporativo'} (${dom})` : NA);
+    lin('Telefone', ex.ddd ? `DDD ${ex.ddd}${ex.regiao ? ' · ' + ex.regiao.praca : ''}` : NA);
+    lin('Cidade', [ex.cidade, ex.estado].filter(Boolean).join('/') || 'não informada');
+    lin('Canal / produto', [ex.canal, ex.tipoProduto].filter(Boolean).join(' · ') || NA);
+
+    L.push('', '━━ 2. LEITURA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    return L.join('\n');
+  }
+
+  function handoffDoLead(entry) {
+    const m = entry.m2 || entry.m1 || {};
+    let fontes = [];
+    try { const fo = contarFontes(entry); fontes = (fo.empresa || []).slice(); } catch (e) {}
+    if (entry.oficial && !fontes.includes('Receita')) fontes.unshift('Receita');
+    const buscas = ((entry.m1 && entry.m1._uso && entry.m1._uso.queries) || 0) + ((entry.m2 && entry.m2._uso && entry.m2._uso.queries) || 0);
+    let quem = '';
+    try { quem = nomeUsuario(); } catch (e) {}
+    const quando = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    return ['',
+      '━━ 3. HANDOFF SDR ➜ CLOSER  (preencher na ligação) ━━━━━━━━━━━━',
+      '',
+      '  Quem atendeu       ____________________  papel: ______________',
+      '  Quem decide        ____________________  quem participa: _____',
+      '  Faturamento real   R$ ________ /mês',
+      '  Gargalo confirmado ⭐ BASE / CONQUISTAR / FECHAR / outro: _____',
+      '  Dor (palavras dele) "_______________________________________"',
+      '  Impacto            ______________________________________',
+      '  Por que agora      ______________________________________',
+      '  Reunião            __/__  __h · com: ____________________',
+      '',
+      `  🔍 Fontes: ${fontes.length ? fontes.join(' · ') : 'busca'}${buscas ? ' · ' + buscas + ' buscas' : ''} · analisado em ${quando}${quem ? ' por ' + quem : ''}`,
+      '═'.repeat(60)].join('\n');
+  }
+
+  function montarDossie(entry, leitura) {
+    return [fichaDoLead(entry), '', String(leitura || '').trim(), handoffDoLead(entry)].join('\n');
   }
 
   async function runMomento3(entry) {
@@ -7788,7 +8529,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     }
 
     const { texto: bruto, uso } = normalizarResposta(await callOpenAI(M3_PROMPT, ctx, ok, M3_TIMEOUT_MS));
-    const texto = limparDossie(bruto, entry);   // v25.0
+    const texto = montarDossie(entry, limparDossie(bruto, entry));   // v25.1: ficha + leitura + handoff
     registrarUso('gpt', uso, 'M3');
     return texto;
   }
@@ -8030,7 +8771,10 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       outcome: cached?.outcome || null,
       elapsed: 0, timer: null,
       state: cached ? 'cached' : 'pending',
+      // v25.1: medição por SDR — de onde veio o pedido e quanto levou
+      tempos: proximaOrigem || { origem: 'seleção', pedido: Date.now() },
     };
+    proximaOrigem = null;
     if (veioDoCache) {
       entry.deCache = true;
       entry.cacheEm = cached.timestamp;
@@ -8153,6 +8897,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
           oficialPromise = pOf;
           entry.extracted._cnpjResolvido = fmtCnpj(rBusca.cnpj);
           if (d.receita) entry.extracted._receita = rOf.empresa;
+          if (d.receita) { try { previaDaReceita(entry, rOf.empresa); } catch (e) {} }   // v25.1
         }
         console.log('[V4] busca crua:', d.adota ? 'adotada' : 'descartada', '·', d.motivo);
       }
@@ -8172,7 +8917,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
       // CNPJ descoberto pela IA → busca oficial
       const cnpjIA = m1.cnpj_descoberto && String(m1.cnpj_descoberto).replace(/[^\d]/g, '');
-      if (!oficialPromise && cnpjIA && cnpjIA.length === 14) {
+      if (!oficialPromise && cnpjIA && cnpjValido(cnpjIA)) {   // v25.1: dígito verificador
         entry.extracted.cnpj = m1.cnpj_descoberto;
         oficialPromise = buscarOficial(cnpjIA, entry.extracted);
       }
@@ -8187,6 +8932,14 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
             console.warn('[V4] CNPJ descartado:', conf.texto);
             try { renderBoxes(entry); } catch (e) {}
             return;                                   // não adota a empresa errada
+          }
+          // v25.1: sem prefixo confirmado, só adota com vínculo ao lead
+          const veto = vetoDeAdocao(r.empresa, entry, conf);
+          if (veto) {
+            entry.cnpjSemVinculo = { cnpj: r.empresa.cnpj, motivo: veto };
+            console.warn('[V4] CNPJ não adotado:', fmtCnpj(r.empresa.cnpj), '·', veto);
+            try { renderBoxes(entry); } catch (e) {}
+            return;
           }
           entry.cnpjConfirmado = conf && conf.bate ? conf : null;
           entry.oficial = r.empresa;
@@ -8370,9 +9123,9 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
         <div class="v4-farol-txt">${f.txt}</div>
         ${entry.farol && entry.farol.motivo && (cor === 'vermelho' || isConcorrente) ? `<div class="v4-farol-motivo">${esc(entry.farol.motivo.slice(0, 44))}</div>` : ''}
       </div>
-      <div class="v4-farol-sub">${entry.elapsed}s${entry.elapsedM2 ? ` + ${entry.elapsedM2}s` : ''} · ${esc((entry.m1 && entry.m1._src) || 'ia')}${entry.m1 && entry.m1._fallback
-        ? ` <span style="color:#F59E0B" title="O Gemini não respondeu a tempo e a análise veio da OpenAI, que não busca na web. Sem CNPJ, sem QSA — só o conhecimento do modelo. Clique em ↻ Refazer para tentar o Gemini de novo.">⤵ sem busca</span>`
-        : ''}${(() => {
+      <div class="v4-farol-sub">${entry.elapsed}s${entry.elapsedM2 ? ` + ${entry.elapsedM2}s` : ''} · ${esc((entry.m1 && entry.m1._src) || 'ia')}${entry.m1 && entry.m1._semBusca
+        ? ` <span style="color:#F59E0B" title="A análise veio da OpenAI sem busca na web — só o conhecimento do modelo. Clique em ↻ Refazer quando o Gemini voltar.">⤵ sem busca</span>`
+        : (entry.m1 && entry.m1._fallback ? ` <span style="color:#9CA3AF" title="O Gemini falhou; a OpenAI julgou os mesmos resultados de busca.">⤵ via OpenAI</span>` : '')}${(() => {
         // v18.7: quantas buscas o grounding realmente fez. Zero com o Gemini
         // ligado significa que ele respondeu só com o conhecimento do modelo —
         // e isso explica "empresa não existe" em empresa que o Google acha.
@@ -8726,13 +9479,87 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
   // A empresa nova tem que ser do lead: o contato é o titular, está no QSA,
   // ou o nome do lead bate com a razão social / fantasia.
+  // v25.1: adotar um CNPJ que não prova nada contamina o card inteiro (caso
+  // LOJAILEAXE com o Mercado Livre; GIRA PEÇAS com outro titular; DOJO com uma
+  // agência homônima). Prefixo do cadastro conferindo é prova sozinho; sem ele,
+  // precisa de vínculo com o lead.
+  function vetoDeAdocao(emp, entry, conf) {
+    if (!emp) return 'sem dados';
+    const ex = entry.extracted || {};
+    if (cnpjDePlataforma(emp, ex.nomeEmpresa)) return 'CNPJ de plataforma ou marketplace — não é a empresa do lead';
+    // v25.2: caso PAGRISA — a análise sem busca adotou o CNPJ do DNIT (autarquia)
+    const publico = /autarquia|funda[çc][ãa]o p[úu]blica|[óo]rg[ãa]o p[úu]blico|empresa p[úu]blica|administra[çc][ãa]o p[úu]blica|munic[íi]pio|poder (executivo|legislativo|judici)/i.test(String(emp.natureza || ''))
+      || /^84/.test(String(emp.cnae || '').replace(/\D/g, ''));
+    if (publico && !nomeBateComEmpresa(ex.nomeEmpresa, emp)) return 'órgão público — não é a empresa do lead';
+    if (conf && conf.bate) return null;
+    if (vinculoComLead(emp, entry)) return null;
+    return 'nada liga este CNPJ ao lead (contato não é sócio, nome ou praça não batem)';
+  }
+
   function vinculoComLead(emp, entry) {
     const ex = entry.extracted || {};
     const nat = lerNatureza(emp, ex.nomeContato);
     if (nat && nat.contatoEhDono) return true;
     const q = matchQsa(emp.qsa || [], ex.nomeContato, emp, ex.emailInfo);
     if (q && (q.confianca === 'alta' || q.confianca === 'media')) return true;
-    return !!nomeBateComEmpresa(ex.nomeEmpresa, emp);
+    if (!nomeBateComEmpresa(ex.nomeEmpresa, emp)) return false;
+    // v25.1: caso DOJO LTDA — "DOJO" casou com a agência DOJO.DO; a empresa
+    // certa é a madeireira de Serra/ES, onde a contato (Thalita Valory) é sócia.
+    // Nome sozinho, com contato de nome completo fora do QSA, só vale se a UF
+    // da empresa bate com a do lead (DDD primeiro: o formulário erra a cidade).
+    const contatoCompleto = partesNome(ex.nomeContato || '').filter(p => p.length > 1).length >= 2;
+    const individual = /individual|empres[áa]rio/i.test(String(emp.natureza || '')) && !/limitada|sociedade/i.test(String(emp.natureza || ''));
+    if (contatoCompleto && ((emp.qsa || []).length || individual)) {
+      const uf2 = v => (/^[A-Za-z]{2}$/.test(String(v || '').trim()) ? String(v).trim().toUpperCase() : null);
+      const ufLead = (ex.regiao && ex.regiao.uf) || uf2(ex.estado);
+      const ufEmp = uf2(emp.uf);
+      if (!ufLead || !ufEmp || ufLead !== ufEmp) return false;
+    }
+    return true;
+  }
+
+  // v25.1: caso DOJO — o contato é sócio de OUTRA empresa com o nome do lead
+  // (achada pela investigação). Essa é a empresa do lead: troca.
+  async function adotarEmpresaDoContato(entry) {
+    const ex = entry.extracted || {};
+    if (partesNome(ex.nomeContato || '').filter(p => p.length > 1).length < 2) return false;
+    const qm = entry.qsaMatch;
+    const contatoNaAtual = (qm && (qm.confianca === 'alta' || qm.confianca === 'media'))
+      || (entry.natureza && entry.natureza.contatoEhDono);
+    if (entry.oficial && contatoNaAtual) return false;
+    const m = entry.m2 || entry.m1 || {};
+    const atual = String((entry.oficial || {}).cnpj || '').replace(/\D/g, '');
+    const cands = (m.outras_empresas || []).filter(e => e && cnpjValido(e.cnpj)
+      && String(e.cnpj).replace(/\D/g, '') !== atual
+      && (e.e_a_do_lead === true || nomeBateComEmpresa(ex.nomeEmpresa, { razao_social: e.nome, nome_fantasia: e.nome })));
+    for (const c of cands.slice(0, 2)) {
+      const r = await buscarOficial(String(c.cnpj).replace(/\D/g, ''), ex);
+      const emp = r && r.empresa;
+      if (!emp || cnpjInativo(emp) || cnpjDePlataforma(emp, ex.nomeEmpresa)) continue;
+      const q = matchQsa(emp.qsa || [], ex.nomeContato, emp, ex.emailInfo);
+      const nat = lerNatureza(emp, ex.nomeContato);
+      if (!((q && (q.confianca === 'alta' || q.confianca === 'media')) || (nat && nat.contatoEhDono))) continue;
+      if (entry.oficial) entry.cnpjTrocado = { de: entry.oficial.cnpj, para: emp.cnpj,
+        motivo: 'o contato não é sócio da empresa achada antes; é sócio desta, que tem o nome do lead' };
+      entry.oficial = emp; entry.oficialFontes = r.fontes; entry.qsaMatch = q || r.qsaMatch;
+      entry.parentesco = r.parentesco; entry.cnpjResolvido = emp.cnpj; entry.cnpjSemVinculo = null;
+      console.log('[V4] empresa do contato adotada:', fmtCnpj(emp.cnpj), emp.razao_social);
+      if (entry.card) applyOficial(entry);
+      try { saveEntry(entry); } catch (e) {}
+      return true;
+    }
+    return false;
+  }
+
+  // v25.1: CNPJ adotado sem prova forte — o contato tem nome completo e não está no QSA
+  function oficialFraco(entry) {
+    const of = entry.oficial;
+    if (!of || entry.cnpjConfirmado) return false;
+    const ex = entry.extracted || {};
+    if (partesNome(ex.nomeContato || '').filter(p => p.length > 1).length < 2) return false;
+    if (!(of.qsa || []).length) return false;
+    const qm = entry.qsaMatch;
+    return !(qm && (qm.confianca === 'alta' || qm.confianca === 'media'));
   }
 
   // Caso CONTÁBIL C. A: CNPJ adotado BAIXADO desde 2017, e a investigação
@@ -8745,7 +9572,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     const m = entry.m2 || entry.m1 || {};
     const cands = [...new Set([m.cnpj_descoberto].concat((m.outras_empresas || []).map(e => e && e.cnpj))
       .map(c => String(c || '').replace(/\D/g, ''))
-      .filter(c => c.length === 14 && c !== atual))].slice(0, 3);
+      .filter(c => cnpjValido(c) && c !== atual))].slice(0, 3);   // v25.1
     if (!cands.length) return false;
     entry._trocandoCnpj = true;
     try {
@@ -8899,11 +9726,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       <button class="v4-act v4-act-m3" data-act="m3" ${hasM3 ? 'disabled' : ''}>
         ${hasM3 ? '✓ dossiê gerado' : '📄 Momento 3 — dossiê SDR'}
       </button>`}
-      ${modoTime() ? '' : `
-      <div class="v4-outcome-label">Resultado</div>
-      <button class="v4-act ${entry.outcome === 'comprei' ? 'on' : ''}" data-out="comprei">Arrematei</button>
-      <button class="v4-act ${entry.outcome === 'passei' ? 'on' : ''}" data-out="passei">Passei</button>
-      <button class="v4-act ${entry.outcome === 'cliente' ? 'on' : ''}" data-out="cliente">Virou cliente</button>`}
+      ${''/* v25.1: a seção "Resultado" saiu — a compra vem da página Minhas
+            Aquisições, e ninguém marcava "Virou cliente". Só poluía o card. */}
     `;
 
     w.querySelectorAll('[data-act]').forEach(b => {
@@ -8957,7 +9781,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
       // CNPJ novo?
       const c = m2.cnpj_descoberto && String(m2.cnpj_descoberto).replace(/[^\d]/g, '');
-      if (c && c.length === 14 && !entry.oficial) {
+      if (c && cnpjValido(c) && !entry.oficial) {   // v25.1: dígito verificador
         const r = await buscarOficial(c, entry.extracted);
         if (r && r.empresa) {
           const conf2 = confrontarCnpj(r.empresa.cnpj, entry.extracted.cnpjParcial);
@@ -8967,15 +9791,23 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
             try { renderBoxes(entry); } catch (e) {}
             return;
           }
+          const veto2 = vetoDeAdocao(r.empresa, entry, conf2);   // v25.1
+          if (veto2) {
+            entry.cnpjSemVinculo = { cnpj: r.empresa.cnpj, motivo: veto2 };
+            console.warn('[V4] CNPJ não adotado (M2):', fmtCnpj(r.empresa.cnpj), '·', veto2);
+          } else {
           entry.cnpjConfirmado = conf2 && conf2.bate ? conf2 : null;
           entry.oficial = r.empresa; entry.oficialFontes = r.fontes;
           entry.qsaMatch = r.qsaMatch; entry.parentesco = r.parentesco;
           entry.cnpjResolvido = r.empresa.cnpj;
           applyOficial(entry);
+          }
         }
       }
       // atualiza checks com o resultado mais recente
       mergeM2IntoChecks(entry);
+      // v25.1: o M2 costuma achar a empresa onde o contato é sócio (caso DOJO)
+      try { await adotarEmpresaDoContato(entry); } catch (e) {}
       // v24.4: o M2 costuma achar o CNPJ ativo de quem fechou e reabriu
       if (cnpjInativo(entry.oficial)) await trocarCnpjBaixado(entry);
       saveEntry(entry);
@@ -9022,7 +9854,11 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       const segDiferente = !!(bA && bB && bA.nome !== bB.nome);
       const semPalavraEmComum = (!bA || !bB) && pA.size > 0 && pB.size > 0 && comuns.length === 0;
 
-      if (segDiferente || semPalavraEmComum) {
+      // v25.1: caso PRO START — o M1 achou uma escola homônima; o M2 corrigiu
+      // para peças de veículos, que bate com o CNAE. Isso é correção, não divergência.
+      const bCn = entry.oficial && entry.oficial.cnae ? classificarMargem(entry.oficial.cnae) : null;
+      const m2ConfirmaCnae = !!(bCn && bB && bCn.nome === bB.nome);
+      if ((segDiferente || semPalavraEmComum) && !m2ConfirmaCnae) {
         div.push(`ramo: "${m1.ramo_aparente}" vs "${m2.ramo_real}"`);
       }
     }
@@ -9105,6 +9941,27 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     // O farol agora sai de um lugar só: renderBoxes, a partir dos quatro boxes.
   }
 
+  // v25.1: contradição que não é contradição só confunde o SDR
+  //  · empresário individual: a razão social é sempre o nome do titular (LE DISTRIBUIDORA)
+  //  · segmento do formulário × ramo real: já se sabe que o formulário erra
+  //  · cidade "declarada" que veio do DDD ou de rótulo vazio ("Cidade:", "(?)")
+  function ruidoNaContradicao(entry, f) {
+    const t = String(f || '');
+    const of = entry.oficial || {};
+    const individual = /individual|empres[áa]rio/i.test(String(of.natureza || '')) && !/limitada|sociedade/i.test(String(of.natureza || ''));
+    if (individual && /raz[ãa]o social/i.test(t) && /nome/i.test(t)) return true;
+    if (/(segmento|ramo) (declarado|marcado|informado)/i.test(t)) return true;
+    if (/cidade[^.]*?(inferid|sugerid|\(\?\)|'cidade:'|"cidade:"|cidade:\s*'|n[ãa]o informad)/i.test(t)) return true;
+    if (/cargo declarado\s*['"]?(telefone|e-?mail|cidade|estado)\s*:/i.test(t)) return true;
+    // v25.2: caso THÁI MOTEL — o M2 leu um cadastro antigo ("sócios: José Carlos
+    // Martins e Odete"); a Receita, que é a fonte oficial, mostra o contato no QSA.
+    const qm = entry.qsaMatch;
+    const receitaConfirma = (qm && (qm.confianca === 'alta' || qm.confianca === 'media'))
+      || (entry.natureza && entry.natureza.contatoEhDono);
+    if (receitaConfirma && /(n[ãa]o (aparece|est[áa]|consta|[ée]) (no|entre os|s[óo]ci)|s[óo]cios? (do|da|s[ãa]o)|nome do contato.*s[óo]cio|n[ãa]o identificado como)/i.test(t)) return true;
+    return false;
+  }
+
   function renderM2(entry) {
     const { m2, card } = entry;
     if (!m2) return;
@@ -9152,6 +10009,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       ];
       flags = flags.filter(f => !jaResolvido.some(re => re.test(String(f))));
     }
+
+    flags = flags.filter(f => !ruidoNaContradicao(entry, f));   // v25.1
 
     w.innerHTML = flags.length ? `
       <div class="v4-sec">
@@ -9561,8 +10420,13 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
   function autoAnalisarSelecao() {
     if (GM_getValue('v4_auto_selecao', '1') !== '1') return;
+    if (Date.now() < ignorarSelecaoAte) return;   // v25.1: palavra do duplo clique
     if (selecaoDentroDoPainel()) return;   // seleção no painel do V4 não é lead
-    const sel = (window.getSelection().toString() || '').trim();
+    let sel = (window.getSelection().toString() || '').trim();
+    // v25.1: ⌘A pega a página inteira, inclusive o painel do botão (um lead virou
+    // "ex.nomeEmpresa || ''"). Com o painel do lead aberto, lê só ele.
+    const pag = lerLeadDaPagina();
+    if (pag && sel.length > pag.length * 1.5 && sel.includes(pag.split('\n')[0])) sel = pag;
     if (!sel || sel === ultimoAuto) return;
 
     const av = avaliarSelecao(sel);
@@ -9668,6 +10532,18 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   document.addEventListener('mouseup', agendarAuto, true);
   document.addEventListener('selectionchange', () => setTimeout(atualizarRotuloFab, 50));
   document.addEventListener('keyup', e => { if (e.shiftKey || e.key === 'a') agendarAuto(); }, true);
+
+  // v25.1: duplo clique para analisar + vigia do leilão (alerta e faixa na página)
+  document.addEventListener('dblclick', aoDuploClique, true);
+  {
+    let vigiaTimer = null;
+    const agendarVigia = () => { clearTimeout(vigiaTimer); vigiaTimer = setTimeout(() => { try { vigiarLeilao(); } catch (e) {} }, 350); };
+    try { new MutationObserver(agendarVigia).observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+    setTimeout(agendarVigia, 1500);
+    if (window.Notification && Notification.permission === 'default' && typeof GM_notification !== 'function') {
+      try { Notification.requestPermission(); } catch (e) {}
+    }
+  }
 
   // Garante chaves e roda o health funcional do dia. Retorna false se deve abortar.
   async function prepararAnalise() {
