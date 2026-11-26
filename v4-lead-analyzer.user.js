@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.14
-// @description  v25.14 · lê o painel do lead campo por campo (contato e faturamento não somem mais)
+// @version      25.15
+// @description  v25.15 · análise com cadastro incompleto não volta do histórico; lista com esse nome só com o nome inteiro
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.14';
+  const VERSION = '25.15';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -3944,8 +3944,17 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       if (!c && out.some(o => normalizarTexto(o.nome) === normalizarTexto(nome))) return;
       out.push({ nome: String(nome || '').slice(0, 70), cnpj: c, local, mesmaUfDDD: !!(local && ufDDD && local.uf === ufDDD) });
     };
+    // v25.15: caso MARCAS E MULTIMARCAS — a lista trazia "Outlet Multimarcas",
+    // "As Multimarcas Veículos", "Multimarcas Consórcios": só dividem uma palavra.
+    // Da busca, entra só quem tem TODAS as palavras do nome do lead.
+    const raiz = (w) => w.replace(/ens$/, 'em').replace(/s$/, '');
+    const toks = (t) => normalizarTexto(String(t || '')).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+      .filter(w => w.length > 2 && !/^(ltda|eireli|epp|dos|das|com|para|the)$/.test(w)).map(raiz);
+    const doLead = toks(ex.nomeEmpresa);
     for (const a of (ex._candidatos || [])) {
       const nome = String(a.titulo || '').replace(/\s*[-|–].*$/, '').trim() || 'empresa citada na busca';
+      const tc = new Set(toks(`${a.titulo} ${a.trecho}`));
+      if (doLead.length && !doLead.every(w => tc.has(w))) continue;
       add(nome, a.cnpj, localDoTexto(`${a.titulo} ${a.trecho}`));
     }
     if (entry.cnpjSemVinculo) add('CNPJ achado sem vínculo com o lead', entry.cnpjSemVinculo.cnpj, null);
@@ -6596,6 +6605,11 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         const d = JSON.parse(raw);
         if (!d.m1 || !d.rawText) continue;
         if (agora - d.timestamp >= HISTORY_TTL_MS) continue;
+        // v25.15: caso MARCAS E MULTIMARCAS — a análise salva tinha sido feita com o
+        // painel mal lido (sem contato e sem faturamento) e voltava como "já
+        // analisado". Análise com cadastro incompleto não é reaproveitada.
+        const exd = d.extracted || {};
+        if (!exd.faturamento && !exd.nomeContato) continue;
 
         // texto sobreposto
         const nq = normalizarParaHash(d.rawText);
@@ -6618,6 +6632,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         }
         // v8.20: mesma identidade de lead (empresa / e-mail / telefone / CNPJ)
         if (id && mesmaIdentidade(id, chaveIdentidade(d.rawText))) {
+          // v25.15: o texto novo traz campos que a análise salva não tinha → nova análise
+          const novoEx = preExtract(texto);
+          if (['nomeContato', 'faturamento', 'email', 'telefone'].some(c => !exd[c] && novoEx[c])) continue;
           if (!melhor || d.timestamp > melhor.quando) {
             melhor = { quando: d.timestamp, dados: d, exato: false, via: 'identidade' };
           }
@@ -9093,7 +9110,14 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     const btn = card.querySelector('[data-reanalisar]');
     if (btn) btn.addEventListener('click', async () => {
       if (!confirm('Refazer a análise do zero?\n\nO resultado salvo será substituído e uma nova consulta será feita nas APIs.')) return;
-      const texto = entry.rawText;
+      let texto = entry.rawText;
+      // v25.15: com o painel do mesmo lead aberto, usa a leitura nova do painel
+      try {
+        const pag = lerLeadDaPagina();
+        const nomeNovo = pag && preExtract(pag).nomeEmpresa;
+        if (pag && chaveNome(nomeNovo) === chaveNome((entry.extracted || {}).nomeEmpresa)) texto = pag;
+      } catch (e) {}
+      GM_setValue(hashLead(entry.rawText), '');
       GM_setValue(hashLead(texto), '');
       const i = queue.indexOf(entry);
       if (i >= 0) queue.splice(i, 1);
@@ -10251,9 +10275,10 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
     // v8.13: avisar quando os dois momentos discordam
     const div = [];
-    if (m1 && m1.is_concorrente !== m2.is_concorrente && (m1.is_concorrente != null || m2.is_concorrente != null))
+    // v25.15: "false" × "null" não é divergência — null é "não sei"
+    if (m1 && typeof m1.is_concorrente === 'boolean' && typeof m2.is_concorrente === 'boolean' && m1.is_concorrente !== m2.is_concorrente)
       div.push(`concorrente: momento 1 disse "${m1.is_concorrente}" · momento 2 disse "${m2.is_concorrente}"`);
-    if (m1 && m1.empresa_existe && m2.empresa_existe && m1.empresa_existe !== m2.empresa_existe)
+    if (m1 && /^(sim|nao)$/.test(String(m1.empresa_existe)) && /^(sim|nao)$/.test(String(m2.empresa_existe)) && m1.empresa_existe !== m2.empresa_existe)
       div.push(`empresa existe: "${m1.empresa_existe}" vs "${m2.empresa_existe}"`);
     // v17.11: comparar os 12 primeiros caracteres acusava sinônimo como
     // contradição. "Açougue / Casa de Carnes" vs "Comércio varejista de carnes
