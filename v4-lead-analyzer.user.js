@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.7
-// @description  v25.7 · lead novo destacado (borda vermelha, selo NOVO e pílula que leva até ele)
+// @version      25.14
+// @description  v25.14 · lê o painel do lead campo por campo (contato e faturamento não somem mais)
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.7';
+  const VERSION = '25.14';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -275,6 +275,7 @@ RETORNE APENAS JSON:
   ],
   "decisor_papel": "cargo REAL achado — preencha sempre que a busca mostrar algum",
   "decisor_evidencia": "1 frase com fonte, ou null",
+  "decisor_url": "URL do resultado que prova o cargo, copiada exatamente (com a cidade/UF que ele mostra na evidência), ou null",
   "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
   "linkedin_contato": "URL ou null",
   "linkedin_empresa": "URL da company page, ou null",
@@ -492,6 +493,7 @@ RETORNE APENAS JSON:
   "decisor_confirmado": "sim"|"parcial"|"nao",
   "decisor_papel": "cargo REAL achado — preencha sempre, mesmo sendo baixo ou contradizendo o cadastro",
   "decisor_evidencia": "frase com fonte",
+  "decisor_url": "URL do resultado que prova o cargo, copiada exatamente (com a cidade/UF que ele mostra na evidência), ou null",
   "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
   "linkedin_contato": "URL ou null",
   "linkedin_empresa": "URL da company page, ou null",
@@ -1121,6 +1123,18 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // repintado depois do M2, da Receita e da troca de CNPJ — e a lista só
     // era redesenhada em alguns desses caminhos. Agora acompanha todos.
     agendarRail();
+    // v25.9: linha fixa com os sócios e a conferência do contato
+    try {
+      entry.linhaSocios = resumoSocios(entry);
+      if (entry.card) {
+        let ls = entry.card.querySelector('.v4-socios');
+        if (!ls) {
+          const head = entry.card.querySelector('.v4-card-head');
+          if (head) { head.insertAdjacentHTML('afterend', '<div class="v4-socios" style="margin:6px 0 2px;font-size:12px;line-height:1.45;color:#D4D4D4"></div>'); ls = entry.card.querySelector('.v4-socios'); }
+        }
+        if (ls) ls.textContent = entry.linhaSocios;
+      }
+    } catch (e) { console.warn('[V4] linha de sócios:', e); }
     // v25.1: faixa com os 4 boxes na página do LeadBroker + tempo até o farol
     try {
       if (entry.tempos && !entry.tempos.farol) entry.tempos.farol = Date.now();
@@ -1150,9 +1164,43 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   let proximaOrigem = null;
   let ignorarSelecaoAte = 0;
 
+  // v25.14: caso RESTAURANTE E PIZZARIA AURORA — o painel mostrava "Nome do
+  // responsável: Paulo Victor Alberto", e o lead saiu sem contato, sem
+  // faturamento e sem canal. A leitura dependia da ORDEM do texto na tela; com o
+  // painel em duas colunas, rótulos e valores podem vir embaralhados. Agora lê
+  // campo por campo: cada campo do LeadBroker é um bloco com o rótulo (<strong>)
+  // e o valor (<p>), e o texto é montado "Rótulo:\nValor" na ordem certa.
+  function lerCamposDoPainel(box) {
+    const campos = [...box.querySelectorAll('[data-testid^="company-detail-"]')];
+    if (campos.length < 3) return null;
+    // ordem fixa (a do cadastro), com a descrição sempre por último — ela é texto
+    // livre e "engole" o que vier depois
+    const ORDEM = ['faturamento', 'segmento', 'pais', 'documento', 'nome do respons', 'e-mail', 'email', 'cargo',
+      'telefone', 'tipo de produto', 'urgencia', 'canal', 'data de criacao', 'descricao'];
+    const pos = (r) => { const n = normalizarTexto(r); const i = ORDEM.findIndex(o => n.startsWith(o)); return i < 0 ? ORDEM.length - 1.5 : i; };
+    const pares = [];
+    for (const c of campos) {
+      if (c.closest('[data-v4]')) continue;
+      const rot = c.querySelector('strong, b, label, dt');
+      const rotulo = String((rot ? rot.textContent : '') || '').trim();
+      if (!rotulo) continue;
+      const valEl = c.querySelector('p, dd, span:not(:empty)');
+      let valor = String((valEl && valEl !== rot ? valEl.textContent : '') || '').trim();
+      if (!valor) valor = String(c.textContent || '').replace(rotulo, '').trim();
+      pares.push({ rotulo: /:$/.test(rotulo) ? rotulo : rotulo + ':', valor, p: pos(rotulo) });
+    }
+    pares.sort((x, y) => x.p - y.p);
+    const linhas = [];
+    const tit = document.querySelector(SEL_TITULO);
+    if (tit) linhas.push(String(tit.textContent || '').trim());
+    for (const x of pares) { linhas.push(x.rotulo); if (x.valor) linhas.push(x.valor); }
+    return linhas.length > 3 ? linhas.join('\n') : null;
+  }
+
   function lerLeadDaPagina() {
     const box = document.querySelector(SEL_DETALHE);
     if (!box) return null;
+    try { const est = lerCamposDoPainel(box); if (est) return est; } catch (e) {}
     // v25.3: caso R COMPUTADORES — a faixa do botão fica DENTRO do painel do
     // lead, e o texto dela ("Empresa · não localizada…") entrava na leitura e
     // atrapalhava o cadastro (faturamento e contato sumiam). Lê sem ela.
@@ -1191,7 +1239,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   // serve — o navegador normaliza o estilo e a página entraria em laço.
   function assinaturaFaixa(entry, compacta) {
     const bs = entry.boxes || {};
-    return [compacta ? 'c' : 'd', (entry.farol || {}).rot, entry._m2Rodando ? 'm2…' : (entry.m2 ? 'm2' : '')].concat(
+    return [compacta ? 'c' : 'd', (entry.farol || {}).rot, entry._m2Rodando ? 'm2…' : (entry.m2 ? 'm2' : ''), entry.linhaSocios || ''].concat(
       ['concorrente', 'empresa', 'decisor', 'margem'].map(k => `${(bs[k] || {}).cor}:${(bs[k] || {}).txt}`)).join('|');
   }
 
@@ -1218,7 +1266,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
             ? '<span style="font-size:11px;font-weight:700;color:#4ADE80">✓ aprofundado</span>'
             : '<span data-v4act="m2" style="font-size:11px;font-weight:700;color:#0A0A0A;background:#FBBF24;border-radius:6px;padding:3px 9px;cursor:pointer;white-space:nowrap">🔍 Aprofundar</span>')}
       </div>`}
-      <div>${itens}</div></div>`;
+      <div>${itens}</div>
+      ${compacta || !entry.linhaSocios ? '' : `<div style="margin-top:6px;font-size:11px;opacity:.9">${esc(entry.linhaSocios)}</div>`}</div>`;
   }
 
   function detalheHTML(entry) {
@@ -1442,14 +1491,24 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   }
 
   // ── duplo clique: analisa o lead do painel, sem marcar texto
+  // v25.8: caso MAXION AGROTEC — o painel do lead abre primeiro só com o nome e
+  // os campos chegam um instante depois. O botão lia cedo demais e o lead saía
+  // sem contato e sem faturamento. Agora espera os campos aparecerem.
+  function painelCompleto(t) {
+    const x = String(t || '');
+    // v25.10: o rótulo aparece antes do valor — exige "Faturamento: De ..."
+    return /Faturamento:?\s*\n?\s*(De|At[ée]|Acima|Mais|R\$|\d)/i.test(x) && /(Nome do respons[áa]vel|E-?mail|Telefone)/i.test(x);
+  }
+
   function aguardarDetalhe(nomeEsperado, ms) {
     const k = chaveNome(nomeEsperado);
     return new Promise(res => {
       const t0 = Date.now();
       const tick = () => {
         const ok = !k || chaveNome(nomeNoDetalhe()) === k;
-        if (ok && lerLeadDaPagina()) return res(true);
-        if (Date.now() - t0 > ms) return res(false);
+        const t = ok ? lerLeadDaPagina() : null;
+        if (t && painelCompleto(t)) return res(true);
+        if (Date.now() - t0 > ms) return res(t ? 'parcial' : false);
         setTimeout(tick, 120);
       };
       tick();
@@ -1457,11 +1516,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
   }
 
   async function analisarDaPagina(nomeCard) {
-    const okDet = await aguardarDetalhe(nomeCard, 2500);
+    const okDet = await aguardarDetalhe(nomeCard, 4000);
     const texto = lerLeadDaPagina();
     if (!okDet || !texto) {
       mostrarDica('<b>Não achei o painel do lead</b><br>Abra o lead e dê o duplo clique de novo.', 3500);
       return;
+    }
+    if (okDet === 'parcial') {
+      mostrarDica('<b>O painel do lead ainda estava carregando</b><br>Analisei com o que havia — confira o contato e o faturamento.', 5000);
     }
     const k = chaveNome(nomeNoDetalhe() || nomeCard);
     proximaOrigem = { origem: 'duplo clique', pedido: Date.now(),
@@ -1605,7 +1667,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       const bruto = String(m.cnpj_descoberto);
       const digitos = bruto.replace(/\D/g, '');
       const inferido = /inferid|provavel|prov[áa]vel|presumid|estimad|talvez|possivelmente|n[ãa]o (explicit|confirmad|encontrad)/i.test(bruto);
-      if (digitos.length === 14 && !inferido) {
+      // v25.11: caso SYSTECH — "40.000.000/0001-00" é número de mentira (dígito
+      // verificador errado). Número inválido não aparece como "achado".
+      if (digitos.length === 14 && !inferido && cnpjValido(digitos)) {
         L.push(['CNPJ', esc(fmtCnpj(digitos)) + ' <span class="v4-tag-al">achado na busca, não consultado</span>']);
       } else {
         L.push(['CNPJ', '<span style="color:#FBBF24">não confirmado</span>'
@@ -1662,13 +1726,38 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const qsaOk = entry.qsaMatch && (entry.qsaMatch.confianca === 'alta' || entry.qsaMatch.confianca === 'media');
     if (!qsaOk) {
       const dec = [];
+      if (!socioCitadoConfere(entry)) {   // v25.9: caso SPOOKIE
+        dec.push('<span style="color:#F59E0B">⚠ a investigação citou um sócio que não consta na Receita — desconsiderado</span>');
+      } else {
       if (m.decisor_papel) dec.push(esc(m.decisor_papel));
       if (m.decisor_evidencia) dec.push(`<span style="color:#888">${esc(m.decisor_evidencia)}</span>`);
+      // v25.13: de onde veio a prova
+      if (m.decisor_url) {
+        const href = /^https?:\/\//i.test(m.decisor_url) ? m.decisor_url : 'https://' + m.decisor_url;
+        dec.push(`<a href="${esc(href)}" target="_blank" rel="noopener">fonte: ${esc(String(m.decisor_url).replace(/^https?:\/\/(www\.)?/, '').split('/')[0])}</a>`);
+      } else if (m.decisor_evidencia) {
+        dec.push('<span style="color:#F59E0B">sem link da fonte — não dá para conferir</span>');
+      }
+      }
       if (dec.length) L.push(['Busca decisor', dec.join('<br>')]);
     }
 
+    // v25.12: todas as empresas que a busca achou com esse nome
+    try {
+      const lista = empresasComEsseNome(entry);
+      if (lista.length && (!entry.oficial || entry.cnpjSemVinculo)) {
+        L.push(['Com esse nome', lista.map(o => esc(linhaEmpresa(o))).join('<br>')
+          + '<br><span style="color:#8A8A8A">o DDD não define a praça — confirmar qual é a do lead</span>']);
+      }
+    } catch (e) {}
+
     const links = [];
-    if (m.site) links.push(`<a href="${esc(m.site)}" target="_blank" rel="noopener">${esc(String(m.site).replace(/^https?:\/\//,''))}</a>`);
+    // v25.11: caso SYSTECH — "systechinformatica.com.br" sem https:// virava
+    // brokers.mktlab.app/systechinformatica.com.br
+    if (m.site) {
+      const href = /^https?:\/\//i.test(String(m.site)) ? String(m.site) : 'https://' + String(m.site).replace(/^\/+/, '');
+      links.push(`<a href="${esc(href)}" target="_blank" rel="noopener">${esc(String(m.site).replace(/^https?:\/\//,''))}</a>`);
+    }
     if (m.instagram) links.push(esc(m.instagram));
     if (links.length) L.push(['Online', links.join(' · ')]);
     const en2 = entry.enriq;
@@ -3208,12 +3297,15 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         if (c.length !== 14 || !cnpjValido(c)) continue;   // v25.1
         const casaPrefixo = alvo ? c.startsWith(alvo) : false;
         const citaNome = nucleo && normalizarTexto(texto).includes(nucleo);
-        achados.push({ cnpj: c, casaPrefixo, citaNome, fonte: it.url, titulo: it.titulo,
+        achados.push({ cnpj: c, casaPrefixo, citaNome, fonte: it.url, titulo: it.titulo, trecho: it.trecho || '',
                        // v23.5: citar um nome genérico não prova nada
                        nomeGenerico: /^(instituto|associa|funda|centro|col[ée]gio|escola|cl[íi]nica|academia|igreja|sociedade|cooperativa|grupo|casa)/i.test(nucleo) });
       }
     }
     if (!achados.length) return null;
+    // v25.12: guarda TODAS as empresas que a busca achou com esse nome — o SDR
+    // vê a lista, mesmo quando nenhuma é adotada (caso SYSTECH: DF, TO, SP, ES)
+    garimparCnpj.ultimos = achados.filter(a => a.citaNome || a.casaPrefixo);
 
     // prioridade: bate o prefixo > cita o nome > primeiro que apareceu
     achados.sort((a, b) => (b.casaPrefixo - a.casaPrefixo) || (b.citaNome - a.citaNome));
@@ -3261,13 +3353,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // CLORO MATO GROSSO. A ordem continua sendo a de prioridade.
     const usar = queries.slice(0, 2);
     const rs = await Promise.all(usar.map(q => buscarWeb(q, 4000, true).catch(() => null)));
+    // v25.12: junta as empresas citadas em todas as buscas, sem repetir
+    const todos = [];
+    let escolhido = null;
     for (let i = 0; i < rs.length; i++) {
       const r = rs[i];
       if (!r || r.erro) continue;
+      garimparCnpj.ultimos = [];
       const achado = garimparCnpj(r, px, ex.nomeEmpresa);
-      if (achado) return { ...achado, query: usar[i], ms: r.ms };
+      for (const a of (garimparCnpj.ultimos || [])) if (!todos.some(t => t.cnpj === a.cnpj)) todos.push(a);
+      if (achado && !escolhido) escolhido = { ...achado, query: usar[i], ms: r.ms };
     }
-    return null;
+    ex._candidatos = todos.slice(0, 8);
+    return escolhido;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -3489,6 +3587,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       return { cor: 'laranja', titulo: 'Concorrente', txt: 'agência achada pode ser homônima',
         sub: `vende "${rc.trecho}", mas nada liga essa empresa ao lead — confirmar o que fazem`, pendente: 'concorrente' };
     }
+    // v25.9: caso SPOOKIE — "agência de publicidade" só no fim do ramo (atividade
+    // secundária). Vale a atividade principal: design não veta; outra coisa vira 🟠.
+    if (rc && !rcDoOficial) {
+      const principalRc = atividadePrincipal(rc.onde);
+      if (principalRc.length > 6 && !VENDE_CRESCIMENTO.test(principalRc)) {
+        if (DESIGN_RE.test(principalRc)) {
+          return { cor: 'verde', titulo: 'Concorrente', txt: 'não é concorrente direto',
+            sub: `estúdio criativo / design · "${rc.trecho}" aparece como atividade secundária` };
+        }
+        return { cor: 'laranja', titulo: 'Concorrente', txt: 'confirmar o que vendem',
+          sub: `"${rc.trecho}" aparece só como atividade secundária`, pendente: 'concorrente' };
+      }
+    }
     if (rc) {
       return {
         cor: 'concorrente', titulo: 'Concorrente',
@@ -3519,7 +3630,13 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // marketing; o ramo que ela mesma achou é recrutamento. Sem termo de
     // concorrente no ramo, não veta: vira suspeita a confirmar.
     const ramoAchado = soAfirmativo(String(m.ramo_real || m.ramo_aparente || ''));
-    if (m.is_concorrente === true && ramoAchado.length > 6 && !VENDE_CRESCIMENTO.test(ramoAchado)) {
+    // v25.9: caso SPOOKIE — estúdio criativo de design não é concorrente direto
+    const principalRamo = atividadePrincipal(ramoAchado);
+    if (m.is_concorrente === true && principalRamo.length > 6 && DESIGN_RE.test(principalRamo) && !VENDE_CRESCIMENTO.test(principalRamo)) {
+      return { cor: 'verde', titulo: 'Concorrente', txt: 'não é concorrente direto',
+        sub: `estúdio criativo / design — confirmar se também vende gestão de marketing` };
+    }
+    if (m.is_concorrente === true && ramoAchado.length > 6 && !VENDE_CRESCIMENTO.test(principalRamo)) {
       return { cor: 'laranja', titulo: 'Concorrente', txt: 'suspeita de concorrente',
         sub: `ramo achado: ${ramoAchado.slice(0, 60)} — confirmar o que fazem`, pendente: 'concorrente' };
     }
@@ -3686,6 +3803,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         return { cor: 'laranja', titulo: 'Empresa', txt: 'nome da empresa não informado',
           sub: `o lead escreveu a atividade ("${String(nomeLead).slice(0, 40)}") — perguntar o nome e o CNPJ`, pendente: 'empresa' };
       }
+      // v25.9: caso GRUPO ADR MONTAGENS — havia 3 empresas com esse nome (MT, SP,
+      // RS). Achar homônimos não é "não existe": é saber qual é a do lead.
+      const homs = [].concat((entry.m2 && entry.m2.homonimos_encontrados) || [], (entry.m1 && entry.m1.homonimos_encontrados) || [])
+        .map(h => typeof h === 'string' ? h : (h && (h.nome || h.razao_social)) || '').filter(Boolean);
+      if (homs.length) {
+        return { cor: 'laranja', titulo: 'Empresa', txt: `existe · ${homs.length} empresa${homs.length > 1 ? 's' : ''} com esse nome`,
+          sub: `${homs.slice(0, 3).join(' · ').slice(0, 120)} — confirmar qual é a do lead`, pendente: 'empresa' };
+      }
       // v25.1: casos HABIBI BEIRUT e CANTINA BEM ESTAR — o momento 1 achou a
       // empresa; o 2 virou "não existe" porque não achou o CNPJ pelo nome
       // fantasia (o registro está no nome do dono). Não achar o CNPJ não prova
@@ -3761,10 +3886,132 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     return { tipo: 'socios', nomes: adm.concat(resto).map(x => x.nome), adm: adm.map(x => x.nome) };
   }
 
+  // v25.9: atividade principal = o primeiro trecho do ramo ("estúdio criativo ...,
+  // pré-impressão, ... e agência de publicidade" → "estúdio criativo ...")
+  function atividadePrincipal(t) {
+    // corta na primeira vírgula/ponto/parêntese — não no "e", que costuma ligar
+    // partes da mesma atividade ("mentoria e consultoria em marketing")
+    return String(t || '').split(/[,;.(]/)[0].trim();
+  }
+  const DESIGN_RE = /est[úu]dio criativo|\bdesign\b|produ[çc][ãa]o visual|fotografia|ilustra[çc]|audiovisual|produtora|edi[çc][ãa]o de (v[íi]deo|imagem)/i;
+
+  // v25.9: caso SPOOKIE — a IA escreveu que o QSA "lista Lucas de Oliveira Lima
+  // como Sócio-Administrador"; ele não está no QSA da Receita, e a busca não liga
+  // esse nome à empresa. A Re comprou o lead com essa informação. Sócio citado
+  // pela investigação só vale se estiver no QSA oficial.
+  function socioCitadoConfere(entry) {
+    const m = entry.m2 || entry.m1 || {};
+    const ev = String(m.decisor_evidencia || '');
+    // v25.11: caso SYSTECH — "sócio-administrador da SYSTECH (CNPJ 40.000.000/0001-00)":
+    // a prova cita um CNPJ que não existe. Evidência com CNPJ inválido é inventada.
+    const cnpjsEv = (ev.match(/\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/g) || []).map(x => x.replace(/\D/g, ''));
+    if (cnpjsEv.some(c => c.length === 14 && !cnpjValido(c))) return false;
+    if (!/s[óo]ci[oa]|administrador|QSA|quadro societ/i.test(ev + ' ' + String(m.decisor_papel || ''))) return true;
+    const qsa = (entry.oficial && entry.oficial.qsa) || [];
+    if (!qsa.length) return true;   // sem Receita, não dá para conferir
+    const evN = normalizarTexto(ev);
+    // cita o CNPJ da empresa adotada → fala desta empresa
+    const cnpjOf = String((entry.oficial && entry.oficial.cnpj) || '').replace(/\D/g, '');
+    if (cnpjOf && ev.replace(/\D/g, '').includes(cnpjOf)) return true;
+    // fala do contato, e o contato bate com alguém do QSA (caso C-REIS: "Luiz")
+    if ((entry.extracted || {}).nomeContato) {
+      const pc = partesNome(entry.extracted.nomeContato);
+      if (pc.length && pc.every(x => evN.includes(x))
+          && qsa.some(sx => partesNome(sx.nome || '')[0] === pc[0])) return true;
+    }
+    return qsa.some(sx => { const ps = partesNome(sx.nome || ''); return ps.length >= 2 && ps.slice(0, 2).every(x => evN.includes(x)); });
+  }
+
+  // v25.9: pedido da unidade — o nome dos sócios aparece SEMPRE, com o resultado
+  // da conferência do contato, em uma linha só.
+  // v25.12: pedido da unidade — "ele precisa trazer as empresas encontradas, o
+  // prefixo do celular não pode limitar estado/cidade". Lista tudo o que a busca
+  // achou com o nome do lead; o DDD só MARCA a que fica na mesma UF, não exclui.
+  const UFS = /^(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)$/;
+  function localDoTexto(t) {
+    const ms = [...String(t || '').matchAll(/([A-ZÁ-Úa-zá-ú][A-Za-zÀ-ú' ]{2,30}?)\s*[\/-]\s*([A-Z]{2})\b/g)].filter(m => UFS.test(m[2]));
+    const m = ms[ms.length - 1];
+    return m ? { cidade: m[1].trim(), uf: m[2] } : null;
+  }
+
+  function empresasComEsseNome(entry) {
+    const ex = entry.extracted || {};
+    const ufDDD = ex.regiao && ex.regiao.uf;
+    const out = [];
+    const add = (nome, cnpj, local) => {
+      const c = String(cnpj || '').replace(/\D/g, '');
+      if (c && (!cnpjValido(c) || out.some(o => o.cnpj === c))) return;
+      if (!c && out.some(o => normalizarTexto(o.nome) === normalizarTexto(nome))) return;
+      out.push({ nome: String(nome || '').slice(0, 70), cnpj: c, local, mesmaUfDDD: !!(local && ufDDD && local.uf === ufDDD) });
+    };
+    for (const a of (ex._candidatos || [])) {
+      const nome = String(a.titulo || '').replace(/\s*[-|–].*$/, '').trim() || 'empresa citada na busca';
+      add(nome, a.cnpj, localDoTexto(`${a.titulo} ${a.trecho}`));
+    }
+    if (entry.cnpjSemVinculo) add('CNPJ achado sem vínculo com o lead', entry.cnpjSemVinculo.cnpj, null);
+    for (const k of ['m2', 'm1']) {
+      for (const h of ((entry[k] && entry[k].homonimos_encontrados) || [])) {
+        const nome = typeof h === 'string' ? h : (h && (h.nome || h.razao_social)) || '';
+        if (nome) add(nome, typeof h === 'object' && h ? h.cnpj : '', localDoTexto(typeof h === 'string' ? h : `${h.cidade || ''}/${h.uf || ''}`));
+      }
+    }
+    if (entry.oficial) {
+      const ofC = String(entry.oficial.cnpj || '').replace(/\D/g, '');
+      return out.filter(o => o.cnpj !== ofC);
+    }
+    return out.slice(0, 6);
+  }
+
+  function linhaEmpresa(o) {
+    return `${o.nome}${o.cnpj ? ' · ' + fmtCnpj(o.cnpj) : ''}${o.local ? ' · ' + o.local.cidade + '/' + o.local.uf : ''}${o.mesmaUfDDD ? ' · mesma UF do telefone' : ''}`;
+  }
+
+  function resumoSocios(entry) {
+    const ex = entry.extracted || {};
+    const dono = donoDaEmpresa(entry.oficial);
+    const rot = dono && dono.tipo === 'titular' ? 'Titular' : 'Sócios';
+    const nomes = dono ? dono.nomes.slice(0, 4).join(' · ')
+      : (entry.oficial ? 'não informados na Receita' : 'CNPJ não confirmado');
+    const contato = ex.nomeContato;
+    const qm = entry.qsaMatch;
+    const confirma = (qm && (qm.confianca === 'alta' || qm.confianca === 'media')) || (entry.natureza && entry.natureza.contatoEhDono);
+    let st;
+    if (!contato) st = '❓ o lead não informou o contato';
+    else if (confirma) st = `✅ ${contato} ${dono && dono.tipo === 'titular' ? 'é o titular' : 'é sócio'} (Receita)`;
+    else if (qm && qm.socio && (qm.confianca === 'baixa' || qm.confianca === 'ambigua')) st = `⚠ ${contato} parece ${qm.socio.nome} — confirmar`;
+    else if (!entry.oficial) st = `❓ ${contato} — sem CNPJ confirmado para conferir`;
+    else {
+      const b = entry.boxes && entry.boxes.decisor;
+      st = b && b.cor === 'verde' ? `✅ ${contato}: ${b.txt}` : `✖ ${contato} não está entre os sócios`;
+    }
+    return `👤 ${rot}: ${nomes}  ·  ${st}`;
+  }
+
   // v25.2: caso THÁI MOTEL — o box dizia "é sócio" e ficava amarelo pedindo
   // confirmação. Título e cor se contradiziam. Amarelo diz "provável sócio".
   function boxDecisor(entry) {
-    const b = boxDecisorBase(entry);
+    let b = boxDecisorBase(entry);
+    const qmB = entry.qsaMatch;
+    const receitaConfirma = (qmB && (qmB.confianca === 'alta' || qmB.confianca === 'media')) || (entry.natureza && entry.natureza.contatoEhDono);
+    // v25.13: caso SYSTECH — "Notícia de 2020 que cita Luciano Marques como dono":
+    // sem link e sem cidade, não dá para saber se é a Systech do lead.
+    const mB = entry.m2 || entry.m1 || {};
+    // vale para fonte fraca (notícia, "outra", sem fonte) — LinkedIn, QSA, site e
+    // registro de classe têm regra própria
+    const fonteFraca = /^(noticia|outra|)$/i.test(String(mB.decisor_fonte || ''));
+    const citaCnpjDoLead = !!(entry.oficial && entry.oficial.cnpj)
+      && String(mB.decisor_evidencia || '').replace(/\D/g, '').includes(String(entry.oficial.cnpj).replace(/\D/g, ''));
+    const provaSemFonte = b && b.cor === 'verde' && !receitaConfirma && fonteFraca && !citaCnpjDoLead && mB.decisor_papel && !mB.decisor_url
+      && !/linkedin\.com|instagram\.com|https?:\/\//i.test(String(mB.decisor_evidencia || ''))
+      && !(entry.iniciais) && !(entry.outrasEmpresas && entry.outrasEmpresas.aDoLead);
+    if (provaSemFonte) {
+      b = { cor: 'amarelo', titulo: 'Decisor', txt: `provável ${String(mB.decisor_papel).toLowerCase().slice(0, 40)}`,
+        sub: 'a prova veio sem link da fonte — confirmar na ligação', pendente: 'decisor' };
+    }
+    if (b && b.cor === 'verde' && !receitaConfirma && !socioCitadoConfere(entry)) {   // v25.9 / v25.11
+      b = { cor: 'amarelo', titulo: 'Decisor', txt: 'sócio citado não consta na Receita',
+        sub: 'a investigação citou um sócio que não está no QSA oficial — confirmar', pendente: 'decisor' };
+    }
     if (b && b.cor !== 'verde' && /^é s[óo]ci[oa]/i.test(String(b.txt || ''))) {
       return Object.assign({}, b, { txt: String(b.txt).replace(/^é s[óo]ci([oa])/i, 'provável sóci$1') });
     }
@@ -3804,8 +4051,19 @@ Cadastro é ponto de partida; investigação é a verdade.`;
           pendente: 'decisor',
         };
       }
-      return { cor: 'amarelo', titulo: 'Decisor', txt: 'contato não informado no lead',
-        sub: soc.length ? `QSA: ${soc[0].nome}` : 'marque o bloco todo do lead', pendente: 'decisor' };
+      // v25.9: regra da unidade — lead sem contato não se compra. Mas só quando
+      // o campo "Nome do responsável" veio e está vazio; se nem veio, foi a leitura
+      // do painel que falhou, e a saída é refazer.
+      const socTxt = soc.length ? ` · sócios: ${soc.slice(0, 3).map(x => x.nome).join(', ')}` : '';
+      // v25.10: no dia 25/11, 11 de 26 leads vieram sem contato E sem faturamento
+      // E sem canal — falha de leitura do painel, não lead sem contato. O STOP só
+      // vale quando o faturamento foi lido (prova de que o cadastro carregou).
+      if (/Nome do respons[áa]vel/i.test(String(entry.rawText || '')) && ex.faturamento) {
+        return { cor: 'vermelho', titulo: 'Decisor', txt: 'lead sem contato — não comprar',
+          sub: `o lead não informou o nome do responsável${socTxt}`, motivo: 'lead sem contato' };
+      }
+      return { cor: 'amarelo', titulo: 'Decisor', txt: 'cadastro não lido por inteiro',
+        sub: `o botão não leu contato nem faturamento — ↻ Refazer com o painel do lead aberto${socTxt}`, pendente: 'decisor' };
     }
     // v15.1: o LB confirmou o decisor? Vale como prova, igual ao QSA.
     const enD = entry.enriq;
@@ -4335,6 +4593,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // v25.2: THÁI MOTEL (CNAE "Motéis") e PAGRISA (açúcar e álcool)
     { re: /\bmot[ée]is\b|\bmotel\b/i, b: 'media', nome: 'turismo / hotelaria' },
     { re: /a[çc][úu]car|\b[áa]lcool\b|etanol|\busina\b|sucroenerg|sucroalcool/i, b: 'baixa', nome: 'agroindústria (commodity)' },
+    // v25.11: caso SYSTECH — "varejo de equipamentos de informática" virava software (alta)
+    { re: /(com[ée]rcio|varej|loja|revenda)[^,;]{0,40}(inform[áa]tica|computador|notebook|eletr[ôo]nic|celular|smartphone|games?|gaming)/i, b: 'baixa', nome: 'varejo não-alimentar' },
     // v25.1: caso EMPÓRIO KIDS — "comércio varejista de confecções" caía em indústria
     { re: /(com[ée]rcio|varej|loja|boutique)[^,;]{0,30}(confec|vestu[áa]ri|roupa|moda|cal[çc]ad)/i, b: 'baixa', nome: 'varejo não-alimentar' },
     { re: /\bbar(es)?\b|botequim|\bpub\b|choperia|petiscaria/i, b: 'media', nome: 'food service' },
@@ -7904,7 +8164,9 @@ decisor_status:
   "indicio"    → sinal isolado
   "nao"        → nada sobre a pessoa
 decisor_papel: o cargo que o resultado mostra, escrito seco ("Sócio-Administrador").
-Sem prova, null.
+Sem prova, null. decisor_url: o link do resultado que prova o cargo, copiado. Na
+decisor_evidencia, cite o site e a cidade/UF que o resultado mostra — notícia sem
+cidade pode ser de uma empresa homônima.
 decisor_papel e decisor_status são sobre ESTA empresa. Ser sócio ou dono de OUTRA
 empresa não é cargo aqui: liste em outras_empresas, com o CNPJ só se ele aparece
 no resultado, e deixe decisor_papel null se não houver prova nesta. Se o cadastro trouxe dígitos do CNPJ,
@@ -7935,6 +8197,7 @@ RETORNE APENAS JSON:
   "decisor_status": "confirmado"|"sem_alcada"|"indicio"|"nao",
   "decisor_papel": "cargo provado, ou null",
   "decisor_evidencia": "1 frase citando o resultado, ou null",
+  "decisor_url": "URL do resultado que prova o cargo, copiada exatamente (com a cidade/UF que ele mostra na evidência), ou null",
   "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
   "linkedin_contato": "URL ou null",
   "linkedin_empresa": "URL ou null",
@@ -7982,6 +8245,7 @@ RETORNE APENAS JSON:
   "decisor_status": "confirmado"|"sem_alcada"|"indicio"|"nao",
   "decisor_papel": "cargo provado, ou null",
   "decisor_evidencia": "frase citando o resultado, ou null",
+  "decisor_url": "URL do resultado que prova o cargo, copiada exatamente (com a cidade/UF que ele mostra na evidência), ou null",
   "decisor_fonte": "qsa"|"linkedin_contato"|"linkedin_empresa"|"site_empresa"|"noticia"|"registro_classe"|"outra"|null,
   "linkedin_contato": "URL ou null",
   "linkedin_empresa": "URL ou null",
@@ -8048,6 +8312,24 @@ RETORNE APENAS JSON:
     return [...out];
   }
 
+  // v25.9: caso GRUPO ADR MONTAGENS — a frase exata "GRUPO ADR MONTAGENS" não
+  // existe; os nomes reais são "Grupo ADR Montagem e Manutenção Industrial",
+  // "Grupo ADR LTDA" e "ADR Montagens LTDA". Variações: sem "Grupo", no
+  // singular, e sigla + ramo.
+  function variantesDaEmpresa(nome) {
+    const base = String(nome || '').replace(/\b(ltda|me|epp|eireli|s\/?a)\b\.?/gi, ' ').replace(/[".]/g, ' ').replace(/\s+/g, ' ').trim();
+    const semGrupo = base.replace(/^(grupo|holding|cia|companhia)\s+/i, '').trim();
+    const singular = semGrupo.split(' ').map(w => /ens$/i.test(w) ? w.replace(/ens$/i, m => (m === 'ENS' ? 'EM' : 'em'))
+      : (/[^s]s$/i.test(w) && w.length > 4 ? w.slice(0, -1) : w)).join(' ');
+    const out = [];
+    const add = v => { if (v && !out.includes(v)) out.push(v); };
+    const toks = semGrupo.split(' ');
+    if (/^[A-Za-z0-9]{2,4}$/.test(toks[0]) && toks[1]) add(`"${toks[0]}" ${atividadePrincipal(toks.slice(1).join(' ')) || toks[1]}`);
+    if (singular && singular !== semGrupo) add(`"${singular}"`);
+    if (semGrupo && semGrupo !== base) add(`"${semGrupo}"`);
+    return out;
+  }
+
   function planoDeBuscas(ex, momento) {
     ex = ex || {};
     const nome = String(ex.nomeEmpresa || '').trim();
@@ -8086,6 +8368,7 @@ RETORNE APENAS JSON:
 
     if (momento === 'M2') {
       if (variantes[0]) add('socios_grafia', `"${variantes[0]}" sócio CNPJ ${uf}`);   // v25.2
+      { const vEmp = variantesDaEmpresa(nome); if (vEmp[0]) add('empresa_variante', `${vEmp[0]} CNPJ`); }   // v25.9
       if (curto && parteDistintiva(normalizarTexto(partesC[0]))) add('nome_curto', `"${curto}" ${cid || uf}`);   // v25.2
       // v25.1: com um nome só, "Stephanie sócio CNPJ" só traz homônimos
       if (contato && contato.split(/\s+/).length >= 2) add('socios', `"${contato}" sócio CNPJ ${uf}`);
@@ -8106,6 +8389,8 @@ RETORNE APENAS JSON:
     if (contato) add('linkedin', `site:linkedin.com/in "${contato}" ${termo}`);
     if (ei.corporativo && ei.dominioFull) add('dominio', `site:${ei.dominioFull}`);
     add('instagram', `${termo} ${cid} instagram`);
+    // v25.9: sobrando vaga (lead sem contato), entra uma variação do nome
+    if (q.length < 4) { const vEmp = variantesDaEmpresa(nome); if (vEmp[0]) add('empresa_variante', `${vEmp[0]} ${uf}`); }
     // v24.1: 4 no Momento 1 — com as 2 do CNPJ, cabem numa rodada só.
     // A checagem de agência sai dos próprios resultados (site, Instagram, CNAE).
     return q.slice(0, 4);
@@ -8167,6 +8452,12 @@ RETORNE APENAS JSON:
       const h = normalizarTexto(j.instagram).replace(/^.*instagram\.com\//, '').replace(/^@/, '')
         .split(/[\/?\s]/)[0];
       if (!h || h.length < 3 || !blob.includes(h)) j.instagram = null;
+    }
+    // v25.13: caso SYSTECH — "notícia de 2020" sem link e sem cidade. A URL da
+    // prova do cargo também tem que estar nos resultados.
+    if (j.decisor_url) {
+      const d = dominio(j.decisor_url);
+      if (!d || !blob.includes(d)) j.decisor_url = null;
     }
     for (const k of ['linkedin_contato', 'linkedin_empresa']) {
       if (!j[k]) continue;
@@ -8367,7 +8658,8 @@ ${semInternos(m1)}`;
     const qm = entry.qsaMatch;
     const ehDono = (qm && (qm.confianca === 'alta' || qm.confianca === 'media')) || (entry.natureza && entry.natureza.contatoEhDono);
     lin('Contato', ex.nomeContato ? `${ex.nomeContato}${of ? (ehDono ? ' · é sócio/titular' : ' · não está entre os sócios') : ''}` : NA);
-    lin('Papel achado', m.decisor_papel ? `${m.decisor_papel}${m.decisor_fonte ? ' (' + m.decisor_fonte + ')' : ''}` : 'nenhum — papel a confirmar');
+    lin('Papel achado', !socioCitadoConfere(entry) ? 'sócio citado pela investigação não consta na Receita — desconsiderado'
+      : (m.decisor_papel ? `${m.decisor_papel}${m.decisor_url ? ' · fonte: ' + String(m.decisor_url).replace(/^https?:\/\/(www\.)?/, '').split('/')[0] : ' · sem link da fonte'}` : 'nenhum — papel a confirmar'));
     lin('Alçada esperada', alcadaDoPorte(fatParaAlcada(entry)).rot);
     const oe = entry.outrasEmpresas && entry.outrasEmpresas.lista;
     if (oe && oe.length) lin('Outras empresas', oe.slice(0, 3).map(e => `${e.nome}${e.cidade ? ' (' + e.cidade + ')' : ''}`).join(' · '));
@@ -8390,6 +8682,14 @@ ${semInternos(m1)}`;
         ? `não confirmado · achado ${fmtCnpj(entry.cnpjSemVinculo.cnpj)}, sem vínculo com o lead`
         : 'não confirmado — pedir na ligação');
     }
+    // v25.12
+    try {
+      const lista = empresasComEsseNome(entry);
+      if (lista.length && (!of || entry.cnpjSemVinculo)) {
+        lin('Com esse nome', lista.slice(0, 4).map(linhaEmpresa).join(' | '));
+        lin('', 'o DDD não define a praça — confirmar qual é a do lead');
+      }
+    } catch (e) {}
     if (entry.cnpjAnterior) lin('CNPJ anterior', `${fmtCnpj(entry.cnpjAnterior.cnpj)} · ${String(entry.cnpjAnterior.situacao || '').toLowerCase()}`);
     if (entry.cnpjTrocado) lin('CNPJ trocado', `${fmtCnpj(entry.cnpjTrocado.de)} ➜ ${fmtCnpj(entry.cnpjTrocado.para)} · ${entry.cnpjTrocado.motivo}`);
 
@@ -9635,7 +9935,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     const individual = /individual|empres[áa]rio/i.test(String(emp.natureza || '')) && !/limitada|sociedade/i.test(String(emp.natureza || ''));
     if (contatoCompleto && ((emp.qsa || []).length || individual)) {
       const uf2 = v => (/^[A-Za-z]{2}$/.test(String(v || '').trim()) ? String(v).trim().toUpperCase() : null);
-      const ufLead = (ex.regiao && ex.regiao.uf) || uf2(ex.estado);
+      // v25.12: a UF declarada vale mais que o DDD (o celular acompanha a pessoa)
+      const ufLead = uf2(ex.estado) || (ex.regiao && ex.regiao.uf);
       const ufEmp = uf2(emp.uf);
       if (!ufLead || !ufEmp || ufLead !== ufEmp) return false;
     }
@@ -9982,7 +10283,13 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       // para peças de veículos, que bate com o CNAE. Isso é correção, não divergência.
       const bCn = entry.oficial && entry.oficial.cnae ? classificarMargem(entry.oficial.cnae) : null;
       const m2ConfirmaCnae = !!(bCn && bB && bCn.nome === bB.nome);
-      if ((segDiferente || semPalavraEmComum) && !m2ConfirmaCnae) {
+      // v25.10: caso DISTRIBUIDORA GABI — "distribuição de produtos saudáveis, food
+      // service..." × "distribuição atacadista de produtos saudáveis, food service..."
+      // é o mesmo negócio escrito de dois jeitos. Mesma margem = não é divergência.
+      const bA0 = classificarMargem(atividadePrincipal(m1.ramo_aparente || ''));
+      const bB0 = classificarMargem(atividadePrincipal(m2.ramo_real || ''));
+      const mesmoNegocio = !!(bA0 && bB0 && bA0.nome === bB0.nome) || comuns.length >= 3;
+      if ((segDiferente || semPalavraEmComum) && !m2ConfirmaCnae && !mesmoNegocio) {
         div.push(`ramo: "${m1.ramo_aparente}" vs "${m2.ramo_real}"`);
       }
     }
@@ -10571,7 +10878,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     // v25.4: caso "contato n/d" — 2 cliques na tarja selecionaram o texto dos
     // boxes ("aprofunde ou confirme na ligação", "ramo fora da régua…") e isso
     // virou um lead vazio, analisado com gasto de API. Texto do botão não é lead.
-    if (/r[ée]gua de margem|aprofunde ou confirme na liga|clique: detalhes|2 cliques: aprofundar|marque o bloco todo do lead|V4 · (GO|CAUTION|STOP|CONCORRENTE)/i.test(sel)) return;
+    if (/r[ée]gua de margem|aprofunde ou confirme na liga|clique: detalhes|2 cliques: aprofundar|marque o bloco todo do lead|veio sem o nome do respons|V4 · (GO|CAUTION|STOP|CONCORRENTE)/i.test(sel)) return;
 
     const av = avaliarSelecao(sel);
     if (!av.ok) {
