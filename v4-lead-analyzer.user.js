@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.18
-// @description  v25.18 · aba 🔎 Google (Maps com telefone e resultados de cada busca); Serper com estado real; reserva sem busca não inventa
+// @version      25.21
+// @description  v25.21 · mais rápido no pico (fila do Gemini, Momento 2 automático) + histórico do time pela planilha
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,8 +36,10 @@
 
   function init() {
 
-  const VERSION = '25.18';
-  const MAX_PARALLEL = 3;
+  const VERSION = '25.21';
+  // v25.20: era 3 — o 4º lead marcado esperava os 3 primeiros terminarem.
+  // Agora as filas do Serper (6) e do Gemini (3) seguram o excesso.
+  const MAX_PARALLEL = 6;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
   // foi 10.7s num lead simples, e lead difícil estoura.
@@ -1649,11 +1651,14 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (/credit|cr[ée]dito|not enough|insufficient|quota|balance/i.test(st.msg) || st.code === 402) {
       return { estado: 'credito', txt: 'Serper sem crédito', t: st.t };
     }
+    if (st.code === 401 || st.code === 403 || /unauthori|invalid api key|api key/i.test(st.msg)) {
+      return { estado: 'chave', txt: `Serper recusou a chave (${st.code})`, t: st.t };
+    }
     return { estado: 'erro', txt: `Serper erro ${st.code || st.msg}`, t: st.t };
   }
 
   function buscarMaps(ex) {
-    const key = GM_getValue('v4_serper_key', '');
+    const key = chaveSerper();
     const nome = String((ex && ex.nomeEmpresa) || '').replace(/\b(ltda|me|eireli|epp)\b\.?/gi, '').trim();
     if (!key || nome.length < 3) return Promise.resolve([]);
     const cid = (ex.cidade && !/não informado|nao informado/i.test(ex.cidade)) ? String(ex.cidade).split('/')[0].trim() : '';
@@ -1853,6 +1858,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
       if (dec.length) L.push(['Busca decisor', dec.join('<br>')]);
     }
+
+    // v25.21: histórico do time
+    if (entry.avisoCentral) L.push(['👥 Time', esc(linhaAvisoCentral(entry.avisoCentral))]);
 
     // v25.12: todas as empresas que a busca achou com esse nome
     try {
@@ -3351,8 +3359,12 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     if (prox) prox(); else serperNoAr = Math.max(0, serperNoAr - 1);
   }
 
+  // v25.19: chave colada com espaço, quebra de linha ou aspas faz o Serper
+  // recusar (401/403). Toda leitura limpa a chave.
+  function chaveSerper() { return String(GM_getValue('v4_serper_key', '') || '').replace(/[\s"'“”‘’]/g, ''); }
+
   async function buscarWeb(query, timeout = 4000, alta = true) {
-    const key = GM_getValue('v4_serper_key', '');
+    const key = chaveSerper();
     if (!key || !query) return null;
     await vezNoSerper(alta);
     try { return await buscarWebDireto(query, timeout, key); }
@@ -6562,7 +6574,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
       GM_setValue('v4_openai_key', cfg.openai);
       if (cfg.gemini) GM_setValue('v4_gemini_key', cfg.gemini);
-      if (cfg.serper) GM_setValue('v4_serper_key', cfg.serper);
+      if (cfg.serper) GM_setValue('v4_serper_key', String(cfg.serper).replace(/[\s"'“”‘’]/g, ''));   // v25.19
       if (cfg.ghlToken) GM_setValue('v4_ghl_token', cfg.ghlToken);
       if (cfg.ghlLocation) GM_setValue('v4_ghl_location', cfg.ghlLocation);
       if (cfg.outbound) { GM_setValue('v4_outbound_token', cfg.outbound); GM_setValue('v4_ob_asked', '1'); }
@@ -7956,6 +7968,85 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     return GM_getValue('v4_usuario', '');
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // HISTÓRICO DO TIME (v25.21)
+  // Antes de analisar, o botão pergunta à planilha central se alguém do time
+  // já analisou esse lead (faixas validadas pela unidade):
+  //   · até 24h     → reaproveita a análise inteira, sem gastar API
+  //   · 1 a 30 dias → avisa "já analisado em dd/mm por Fulano" e analisa de novo
+  //   · mais de 30  → avisa como histórico e analisa de novo
+  // A consulta tem teto de 1,5 s: se a planilha não responder, segue normal.
+  // ═══════════════════════════════════════════════════════════════
+  const avisosCentral = new Map();
+  const DIA_MS = 24 * 60 * 60 * 1000;
+
+  function chaveLead(ex) {
+    const n = (t) => normalizarTexto(String(t || '')).replace(/[^a-z0-9]/g, '');
+    const contato = String((ex && ex.nomeContato) || '').trim().split(/\s+/)[0] || '';
+    const uf = String((ex && (ex.estado || (ex.regiao && ex.regiao.uf))) || '').trim().slice(0, 2);
+    return `${n(ex && ex.nomeEmpresa)}|${n(contato)}|${n(uf)}`;
+  }
+
+  function consultarCentral(ex) {
+    const url = sheetUrl();
+    if (!url) return Promise.resolve(null);
+    const cnpj = String((ex && ex.cnpjCompleto) || '').replace(/\D/g, '');
+    const q = `${url}${url.includes('?') ? '&' : '?'}acao=buscar&chave=${encodeURIComponent(chaveLead(ex))}${cnpj.length === 14 ? '&cnpj=' + cnpj : ''}`;
+    return new Promise(resolve => {
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: q, timeout: 1500,
+          onload(r) { try { const d = JSON.parse(r.responseText); resolve(d && d.achou ? d : null); } catch (e) { resolve(null); } },
+          onerror() { resolve(null); }, ontimeout() { resolve(null); },
+        });
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  // decide o que fazer com o que a planilha devolveu
+  function aplicarCentral(c, texto) {
+    if (!c || !c.quando) return 'nada';
+    const idade = Date.now() - Date.parse(c.quando);
+    if (!(idade >= 0)) return 'nada';
+    const aviso = { quando: c.quando, usuario: c.usuario || 'alguém do time', farol: c.farol || '', idade };
+    avisosCentral.set(hashLead(texto), aviso);
+    if (idade < DIA_MS && c.registro) {
+      try {
+        const reg = JSON.parse(c.registro);
+        if (!reg || !reg.m1) return 'aviso';
+        reg.rawText = texto;                                   // casa com o texto de agora
+        reg.timestamp = Date.parse(c.quando);
+        reg.meta = Object.assign({}, reg.meta || {}, { usuario: aviso.usuario, via: 'central' });
+        GM_setValue(hashLead(texto), JSON.stringify(reg));
+        return 'reaproveitado';
+      } catch (e) { return 'aviso'; }
+    }
+    return 'aviso';
+  }
+
+  function linhaAvisoCentral(a) {
+    if (!a) return '';
+    const d = new Date(a.quando);
+    const quando = a.idade < DIA_MS
+      ? `hoje às ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+      : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    const tipo = a.idade < DIA_MS ? 'análise reaproveitada' : (a.idade <= 30 * DIA_MS ? 'analisado de novo agora' : 'histórico');
+    return `já analisado ${quando} por ${a.usuario}${a.farol ? ' · ' + a.farol : ''} — ${tipo}`;
+  }
+
+  // o registro que vai para a planilha, sem os resultados de busca (limite de célula)
+  function registroParaCentral(entry) {
+    try {
+      const raw = GM_getValue(hashLead(entry.rawText), '');
+      if (!raw) return '';
+      const r = JSON.parse(raw);
+      for (const k of ['m1', 'm2']) if (r[k]) delete r[k]._resultados;
+      let s = JSON.stringify(r);
+      if (s.length > 45000) { delete r.m3; s = JSON.stringify(r); }
+      return s.length > 45000 ? '' : s;
+    } catch (e) { return ''; }
+  }
+
   function enviarParaSheet(entry, evento) {
     const url = sheetUrl();
     if (!url) return;                       // sem planilha configurada: não faz nada
@@ -8001,6 +8092,8 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
         momento3: entry.m3 ? 'sim' : 'nao',
         resultado: entry.outcome || '',
         site: (entry.m2 && entry.m2.site) || (entry.m1 && entry.m1.site) || '',
+        chave_lead: chaveLead(ex),                 // v25.21: para o time reaproveitar
+        registro_json: registroParaCentral(entry), // v25.21
         tokens_mes: cons ? (cons.gem.in + cons.gem.out + cons.gpt.in + cons.gpt.out) : 0,
 
         // v16.1: base de funil — com isto a planilha responde qual canal
@@ -8156,12 +8249,35 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
   function geminiPausado() { return Date.now() < Number(GM_getValue('v4_gemini_pausa_ate', 0) || 0); }
   function geminiOk() { GM_setValue('v4_gemini_falhas', 0); GM_setValue('v4_gemini_pausa_ate', 0); }
   function geminiFalhou(msg) {
+    GM_setValue('v4_gemini_ultimo_erro', `${String(msg || '').slice(0, 140)} · ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`);   // v25.19
     const n = Number(GM_getValue('v4_gemini_falhas', 0) || 0) + 1;
     GM_setValue('v4_gemini_falhas', n);
     if (n >= 2 || /402|401|403|quota|billing|payment|pagamento|api key/i.test(String(msg || ''))) {
       GM_setValue('v4_gemini_pausa_ate', Date.now() + 10 * 60 * 1000);
       console.warn('[V4] Gemini pausado por 10 min:', msg);
     }
+  }
+
+  // v25.20: fila do Gemini. Nos picos, vários leads marcados + Momento 2 de
+  // outros + dossiê disparavam muitas chamadas juntas, a conta recusava (429) e
+  // a análise caía na reserva "sem busca". No máximo 3 no ar; o Momento 1
+  // (que decide o lance) passa na frente do Momento 2 e do dossiê.
+  const GEMINI_MAX = 3;
+  let geminiNoAr = 0;
+  const geminiFilaAlta = [], geminiFilaBaixa = [];
+  function vezNoGemini(alta) {
+    return new Promise(res => {
+      if (geminiNoAr < GEMINI_MAX) { geminiNoAr++; return res(); }
+      (alta ? geminiFilaAlta : geminiFilaBaixa).push(res);
+    });
+  }
+  function liberarGemini() {
+    const prox = geminiFilaAlta.shift() || geminiFilaBaixa.shift();
+    if (prox) prox(); else geminiNoAr = Math.max(0, geminiNoAr - 1);
+  }
+  async function comFilaGemini(fn, alta) {
+    await vezNoGemini(alta);
+    try { return await fn(); } finally { liberarGemini(); }
   }
 
   async function executarIA(prompt, user, timeout, tag, opts) {
@@ -8210,7 +8326,7 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
     // v25.2: Gemini que acabou de falhar é pulado por 10 min (ex.: 402, sem crédito)
     const pausado = geminiPausado();
     if (gk && !(pausado && ok)) {
-      try { const r = await viaGemini(); geminiOk(); return r; }
+      try { const r = await comFilaGemini(() => viaGemini(), /^M1/.test(String(tag))); geminiOk(); return r; }
       catch (e) {
         erros.push('gemini: ' + e.message);
         geminiFalhou(e.message);
@@ -8697,8 +8813,10 @@ ${semInternos(m1)}`;
     const r = await tentarRapido(M2_RAPIDO_PROMPT, user, ex, 'M2');
     // "não existe" é o veredito mais caro. Com trechos de busca só, ele não
     // fecha: se a empresa não saiu confirmada, a busca completa confere.
-    if (r && r.empresa_existe === 'sim') return r;
-    if (r) console.log('[V4] M2 rápido não confirmou a empresa — conferindo com a busca completa');
+    // v25.20: a busca completa leva 20–40s e era chamada na maioria dos leads.
+    // Só vale a pena quando o rápido não achou rastro nenhum da empresa.
+    if (r && (r.empresa_existe === 'sim' || r.empresa_existe === 'parcial')) return r;
+    if (r) console.log('[V4] M2 rápido sem rastro da empresa — conferindo com a busca completa');
     return executarIA(M2_PROMPT, user, M2_TIMEOUT_MS, 'M2');
   }
 
@@ -9369,6 +9487,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       state: cached ? 'cached' : 'pending',
       // v25.1: medição por SDR — de onde veio o pedido e quanto levou
       tempos: proximaOrigem || { origem: 'seleção', pedido: Date.now() },
+      avisoCentral: avisosCentral.get(hashLead(rawText)) || null,   // v25.21
     };
     proximaOrigem = null;
     if (veioDoCache) {
@@ -9425,6 +9544,23 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     if (!temPessoa) falta.push('nome do responsável, e-mail ou telefone');
     if (!temPorte) falta.push('faturamento');
     return { falta, texto: 'A seleção não trouxe ' + falta.join(' nem ') };
+  }
+
+  // v25.20: pedido da unidade — no fim, a maioria dos leads vai para o Momento 2.
+  // Ele roda sozinho, em segundo plano, para 🟢 e 🟡 (não para 🔴 nem 🚨),
+  // com prioridade menor que o Momento 1 dos leads seguintes.
+  function agendarM2Auto(entry) {
+    if (GM_getValue('v4_m2_auto', '1') !== '1') return;
+    if (!entry || entry.m2 || entry._m2Rodando) return;
+    const rot = String((entry.farol || {}).rot || '');
+    if (!rot || /STOP|CONCORRENTE/i.test(rot)) return;
+    setTimeout(async () => {
+      if (entry.m2 || entry._m2Rodando) return;
+      entry._m2Rodando = true;
+      try { pintarNaPagina(entry); } catch (e) {}
+      try { await doM2(entry); } catch (e) { console.warn('[V4] Momento 2 automático:', e.message); }
+      finally { entry._m2Rodando = false; try { pintarNaPagina(entry); } catch (e) {} }
+    }, 300);
   }
 
   async function startM1(entry) {
@@ -9554,6 +9690,7 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
       entry.state = 'done';
       saveEntry(entry);
+      agendarM2Auto(entry);   // v25.20
     } catch (e) {
       entry.state = 'error';
       entry.error = e.message;
@@ -11307,6 +11444,14 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
     if (!ok) return;
     if (window.getSelection) window.getSelection().removeAllRanges();
     openPanel();
+    // v25.21: alguém do time já analisou? (teto de 1,5 s; sem planilha, pula)
+    if (sheetUrl() && !analisadoAntes(texto)) {
+      try {
+        const c = await consultarCentral(preExtract(texto));
+        const r = aplicarCentral(c, texto);
+        if (r !== 'nada') console.log('[V4] histórico do time:', r, c && c.usuario, c && c.quando);
+      } catch (e) {}
+    }
     addLead(texto);
   }
 
@@ -11850,6 +11995,25 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
     // v19.1: teste funcional do grounding — é o que separa "chave ok" de
     // "a busca está funcionando".
+    // v25.19: teste real do Serper (1 busca) — o "ON" não dizia se a chave funciona
+    L.push('', '━━━ TESTE REAL DO SERPER ━━━');
+    if (!chaveSerper()) {
+      L.push('❌ sem chave do Serper — ⚙ Mais opções → 🔑 Chaves → 3');
+    } else {
+      const ts = Date.now();
+      const rs = await buscarWebDireto('Serja Industria de Moveis e Marcenaria CNPJ', 8000, chaveSerper());
+      const es = estadoSerper();
+      if (rs && !rs.erro) {
+        const n = (rs.resultados || []).reduce((a, g) => a + ((g.itens || []).length), 0);
+        L.push(`✅ Serper respondeu 200 · ${n} resultados · ${((Date.now() - ts) / 1000).toFixed(1)}s`);
+      } else {
+        L.push(`❌ Serper falhou: ${(rs && rs.erro) || 'sem resposta'} · ${es.txt}`);
+        let st = null; try { st = JSON.parse(GM_getValue('v4_serper_status', 'null')); } catch (e) {}
+        if (st && st.msg) L.push(`   resposta do Serper: ${st.msg}`);
+        L.push(`   chave usada: ${chaveSerper().slice(0, 4)}…${chaveSerper().slice(-4)} (${chaveSerper().length} caracteres)`);
+      }
+    }
+
     L.push('', '━━━ TESTE REAL DA BUSCA WEB ━━━');
     // v19.5: o teste leva até 25s e o painel ficava parado, sem sinal de vida
     mostrarDica('<b>🩺 Testando as APIs…</b><br>Consultando o Gemini com busca real. Até 25 segundos.', 26000);
@@ -11911,7 +12075,9 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       { const es = estadoSerper();   // v25.18
         L.push(`  ${es.estado === 'ok' ? '✅' : (es.estado === 'novo' ? '⚪' : '❌')} Serper    ${es.txt}${es.t ? ' · última busca ' + new Date(es.t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}`); }
       { const pausa = Number(GM_getValue('v4_gemini_pausa_ate', 0) || 0), fal = Number(GM_getValue('v4_gemini_falhas', 0) || 0);
-        if (fal || pausa > Date.now()) L.push(`     Gemini: ${fal} falha(s) seguida(s)${pausa > Date.now() ? ' · pausado até ' + new Date(pausa).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}`); }
+        if (fal || pausa > Date.now()) L.push(`     Gemini: ${fal} falha(s) seguida(s)${pausa > Date.now() ? ' · pausado até ' + new Date(pausa).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}`);
+        const ue = GM_getValue('v4_gemini_ultimo_erro', '');   // v25.19
+        if (fal && ue) L.push(`     último erro do Gemini: ${ue}`); }
     } else {
       L.push('', '⚠️ Integrações ainda não testadas — clique no ↻ do painel');
     }
