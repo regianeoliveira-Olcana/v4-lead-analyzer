@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.21
-// @description  v25.21 · mais rápido no pico (fila do Gemini, Momento 2 automático) + histórico do time pela planilha
+// @version      25.25
+// @description  v25.25 · histórico de 12 meses na planilha central; máquinas: gestão 30 dias, time 24h
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.21';
+  const VERSION = '25.25';
   // v25.20: era 3 — o 4º lead marcado esperava os 3 primeiros terminarem.
   // Agora as filas do Serper (6) e do Gemini (3) seguram o excesso.
   const MAX_PARALLEL = 6;
@@ -53,7 +53,11 @@
   const M2_TIMEOUT_MS = 25000;   // Momento 2 — aprofundamento
   const M3_TIMEOUT_MS = 30000;   // Momento 3 — dossiê SDR
   const HEALTH_STALE_MS = 4 * 3600 * 1000;
-  const HISTORY_TTL_MS = 30 * 24 * 3600 * 1000;
+  // v25.23 (LGPD): nas máquinas do time, os dados dos leads ficam só 24 horas —
+  // o reaproveitamento entre pessoas passa pela planilha central, que é só da
+  // gestão. v25.25: os 12 meses de histórico ficam na planilha central; na
+  // máquina da gestão, 30 dias (para o navegador não ficar lento).
+  let HISTORY_TTL_MS = 30 * 24 * 3600 * 1000;
 
   // v22.0: credenciais do GHL — o lead comprado vai pro CRM com a análise
   function askGhlKeys() {
@@ -1640,6 +1644,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
   function registrarSerper(code, msg) {
     try { GM_setValue('v4_serper_status', JSON.stringify({ code, msg: String(msg || '').slice(0, 160), t: Date.now() })); } catch (e) {}
+    // v25.22: a faixa de status só era desenhada ao abrir — mostrava "ainda sem
+    // busca" com 21 buscas feitas. Redesenha (no máximo a cada 2 s).
+    clearTimeout(registrarSerper.t);
+    registrarSerper.t = setTimeout(() => { try { renderHealth(); } catch (e) {} }, 2000);
   }
 
   function estadoSerper() {
@@ -2961,6 +2969,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       'v4-consumo',        // gestão de custo, não operação
       'v4-teto',           // idem
       'v4-export-json',    // exportação técnica
+      'v4-export-csv',     // v25.23 (LGPD): dados de leads não saem das máquinas do time
     ];
     for (const id of esconder) {
       const e = document.getElementById(id);
@@ -3941,6 +3950,13 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       if (m._semBusca || (entry.m1 && entry.m1._semBusca && !entry.m2)) {
         return { cor: 'amarelo', titulo: 'Empresa', txt: 'não verificada',
           sub: 'a análise rodou sem busca na internet — analise de novo', pendente: 'empresa' };
+      }
+      // v25.22: caso ARIEL ARARUNA — o lead pôs o próprio nome no campo da empresa.
+      // Não achar uma "empresa" com o nome de uma pessoa não prova nada.
+      const exN = entry.extracted || {};
+      if (empresaEhOContato(exN.nomeEmpresa, exN.nomeContato)) {
+        return { cor: 'laranja', titulo: 'Empresa', txt: 'nome da empresa = nome do contato',
+          sub: 'o lead pôs o próprio nome no campo da empresa — perguntar o nome e o CNPJ', pendente: 'empresa' };
       }
       // v25.2: o lead escreveu a atividade no lugar do nome
       const nomeLead = (entry.extracted || {}).nomeEmpresa;
@@ -6868,6 +6884,24 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     }));
   }
 
+  // v25.23 (LGPD): apaga desta máquina os leads que passaram do prazo
+  function limparLeadsVencidos() {
+    if (typeof GM_listValues === 'undefined') return 0;
+    let n = 0;
+    const agora = Date.now();
+    for (const k of GM_listValues()) {
+      if (!k.startsWith('lead_')) continue;
+      try {
+        const raw = GM_getValue(k, '');
+        if (!raw) continue;
+        const d = JSON.parse(raw);
+        if (!d.timestamp || agora - d.timestamp >= HISTORY_TTL_MS) { GM_setValue(k, ''); n++; }
+      } catch (e) { GM_setValue(k, ''); n++; }
+    }
+    if (n) console.log(`[V4] LGPD: ${n} lead(s) vencido(s) apagado(s) desta máquina`);
+    return n;
+  }
+
   function clearAllCache() {
     if (typeof GM_listValues !== 'undefined') {
       GM_listValues().forEach(k => { if (k.startsWith('lead_')) GM_setValue(k, ''); });
@@ -8606,6 +8640,13 @@ RETORNE APENAS JSON:
     return out;
   }
 
+  // v25.22: o campo da empresa traz o nome da própria pessoa
+  function empresaEhOContato(empresa, contato) {
+    const n = (t) => normalizarTexto(String(t || '')).replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const e = n(empresa), c = n(contato);
+    return !!(e && c && e.split(' ').length >= 2 && (e === c || c.startsWith(e) || e.startsWith(c)));
+  }
+
   function planoDeBuscas(ex, momento) {
     ex = ex || {};
     const nome = String(ex.nomeEmpresa || '').trim();
@@ -8816,6 +8857,9 @@ ${semInternos(m1)}`;
     // v25.20: a busca completa leva 20–40s e era chamada na maioria dos leads.
     // Só vale a pena quando o rápido não achou rastro nenhum da empresa.
     if (r && (r.empresa_existe === 'sim' || r.empresa_existe === 'parcial')) return r;
+    // v25.22: nome de pessoa no campo da empresa — a busca completa (30s) não acha
+    // empresa nenhuma também; fica com o rápido
+    if (r && empresaEhOContato(ex.nomeEmpresa, ex.nomeContato)) return r;
     if (r) console.log('[V4] M2 rápido sem rastro da empresa — conferindo com a busca completa');
     return executarIA(M2_PROMPT, user, M2_TIMEOUT_MS, 'M2');
   }
@@ -12205,6 +12249,12 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
   // v23.8: estes dois blocos estavam DENTRO do clique do Race. A vigia do
   // GHL só começava depois de alguém clicar nele — e o time nem vê o botão.
   aplicarModoTime();   // v23.0
+  // v25.23 (LGPD): prazo local e limpeza do que já passou dele
+  try {
+    if (modoTime()) HISTORY_TTL_MS = 24 * 3600 * 1000;
+    limparLeadsVencidos();
+    setInterval(limparLeadsVencidos, 60 * 60 * 1000);
+  } catch (e) {}
 
   // v22.0: vigia a página de aquisições. A tabela é carregada por JS, então
   // observa mudanças no DOM em vez de ler uma vez só. O envio pro GHL acontece
