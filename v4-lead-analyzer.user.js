@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🔴 V4 Lead Analyzer
 // @namespace    https://v4company.com
-// @version      25.15
-// @description  v25.15 · análise com cadastro incompleto não volta do histórico; lista com esse nome só com o nome inteiro
+// @version      25.18
+// @description  v25.18 · aba 🔎 Google (Maps com telefone e resultados de cada busca); Serper com estado real; reserva sem busca não inventa
 // @author       V4 Company
 // @match        *://brokers.mktlab.app/*
 // @match        *://*.mktlab.app/*
@@ -36,7 +36,7 @@
 
   function init() {
 
-  const VERSION = '25.15';
+  const VERSION = '25.18';
   const MAX_PARALLEL = 3;
   // v19.8: os 15s foram definidos quando o Gemini respondia em 3-4s — porque
   // não estava buscando (thinkingBudget 0). Com busca real o tempo observado
@@ -1626,6 +1626,118 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     return d.length === 14 ? `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5,8)}/${d.slice(8,12)}-${d.slice(12)}` : String(c || '');
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // ABA "🔎 GOOGLE" (v25.18)
+  // A unidade comparou com a pesquisa no Google e viu que, muitas vezes, o
+  // Google já trazia a resposta. O botão recebe os MESMOS resultados (o Serper
+  // é o Google), mas só a IA via. Agora o SDR vê também: o que o Google Maps
+  // tem da empresa (telefone, endereço, nota) e os resultados de cada busca,
+  // com link. E um atalho para abrir a pesquisa no Google numa aba ao lado.
+  // ═══════════════════════════════════════════════════════════════
+  const SERPER_PLACES_URL = 'https://google.serper.dev/places';
+
+  function registrarSerper(code, msg) {
+    try { GM_setValue('v4_serper_status', JSON.stringify({ code, msg: String(msg || '').slice(0, 160), t: Date.now() })); } catch (e) {}
+  }
+
+  function estadoSerper() {
+    if (!GM_getValue('v4_serper_key', '')) return { estado: 'sem', txt: 'sem Serper' };
+    let st = null;
+    try { st = JSON.parse(GM_getValue('v4_serper_status', 'null')); } catch (e) {}
+    if (!st) return { estado: 'novo', txt: 'Serper — ainda sem busca' };
+    if (st.code === 200) return { estado: 'ok', txt: 'Serper ON 200', t: st.t };
+    if (/credit|cr[ée]dito|not enough|insufficient|quota|balance/i.test(st.msg) || st.code === 402) {
+      return { estado: 'credito', txt: 'Serper sem crédito', t: st.t };
+    }
+    return { estado: 'erro', txt: `Serper erro ${st.code || st.msg}`, t: st.t };
+  }
+
+  function buscarMaps(ex) {
+    const key = GM_getValue('v4_serper_key', '');
+    const nome = String((ex && ex.nomeEmpresa) || '').replace(/\b(ltda|me|eireli|epp)\b\.?/gi, '').trim();
+    if (!key || nome.length < 3) return Promise.resolve([]);
+    const cid = (ex.cidade && !/não informado|nao informado/i.test(ex.cidade)) ? String(ex.cidade).split('/')[0].trim() : '';
+    const uf = /^[A-Za-z]{2}$/.test(String(ex.estado || '').trim()) ? String(ex.estado).trim() : '';
+    const q = `${nome} ${cid || uf}`.trim();
+    return new Promise(resolve => {
+      GM_xmlhttpRequest({
+        method: 'POST', url: SERPER_PLACES_URL,
+        headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' },
+        data: JSON.stringify({ q, gl: 'br', hl: 'pt-br' }),
+        timeout: 5000,
+        onload(r) {
+          try {
+            if (r.status >= 400) { registrarSerper(r.status, r.responseText); return resolve([]); }
+            const d = JSON.parse(r.responseText);
+            resolve(filtrarMaps(d.places || [], ex));
+          } catch (e) { resolve([]); }
+        },
+        onerror() { resolve([]); },
+        ontimeout() { resolve([]); },
+      });
+    });
+  }
+
+  // só lugares que têm TODAS as palavras do nome do lead (mesma regra da lista)
+  function filtrarMaps(places, ex) {
+    const raiz = (w) => w.replace(/ens$/, 'em').replace(/s$/, '');
+    const toks = (t) => normalizarTexto(String(t || '')).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+      .filter(w => w.length > 1 && !/^(de|da|do|e|em|me|ltda|eireli|epp|dos|das|com|para)$/.test(w)).map(raiz);   // siglas de 2 letras contam (TX)
+    const doLead = toks(ex.nomeEmpresa);
+    return (places || []).filter(p => {
+      const tp = new Set(toks(p.title));
+      return doLead.length && doLead.every(w => tp.has(w));
+    }).slice(0, 3).map(p => ({
+      nome: p.title || '', endereco: p.address || '', telefone: p.phoneNumber || '',
+      nota: p.rating || null, avaliacoes: p.ratingCount || null, categoria: p.category || '', site: p.website || '',
+    }));
+  }
+
+  function linkGoogle(ex) {
+    const cid = (ex.cidade && !/não informado|nao informado/i.test(ex.cidade)) ? String(ex.cidade).split('/')[0].trim() : '';
+    const q = [`"${String(ex.nomeEmpresa || '').trim()}"`, ex.nomeContato || '', cid].filter(Boolean).join(' ');
+    return 'https://www.google.com/search?q=' + encodeURIComponent(q);
+  }
+
+  function googleHTML(entry) {
+    const ex = entry.extracted || {};
+    const blocos = [];
+    for (const p of (entry.maps || [])) {
+      blocos.push(`<div style="margin:4px 0 8px"><b>📍 ${esc(p.nome)}</b>${p.categoria ? ` · ${esc(p.categoria)}` : ''}<br>`
+        + [p.telefone ? `📞 ${esc(p.telefone)}` : '', p.endereco ? esc(p.endereco) : '',
+           p.nota ? `⭐ ${esc(p.nota)}${p.avaliacoes ? ' (' + esc(p.avaliacoes) + ' avaliações)' : ''}` : '',
+           p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener">${esc(String(p.site).replace(/^https?:\/\/(www\.)?/, '').slice(0, 40))}</a>` : '']
+          .filter(Boolean).join(' · ') + '</div>');
+    }
+    const grupos = [].concat((entry.m1 && entry.m1._resultados) || [], (entry.m2 && entry.m2._resultados) || []);
+    const vistos = new Set();
+    for (const g of grupos) {
+      const itens = (g.itens || []).filter(it => it.url && !vistos.has(it.url));
+      if (!itens.length) continue;
+      itens.forEach(it => vistos.add(it.url));
+      blocos.push(`<div style="margin:6px 0 2px;opacity:.6;font-size:11px">busca: ${esc(g.query)}</div>`
+        + itens.map(it => `<div style="margin:2px 0 6px"><a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.titulo || it.url)}</a>`
+          + `<div style="opacity:.75">${esc(it.trecho || '')}</div></div>`).join(''));
+    }
+    const abrir = `<a href="${esc(linkGoogle(ex))}" target="_blank" rel="noopener" style="font-weight:700">↗ abrir a pesquisa no Google</a>`;
+    const n = (entry.maps || []).length + vistos.size;
+    return `<details class="v4-google" style="margin-top:8px;font-size:12px;line-height:1.45">
+      <summary style="cursor:pointer;font-weight:700">🔎 Google · ${n ? n + ' resultado' + (n > 1 ? 's' : '') : 'nenhum resultado guardado'}</summary>
+      <div style="padding:6px 2px">${blocos.join('') || '<div style="opacity:.7">o botão não recebeu resultados de busca nesta análise</div>'}${abrir}</div>
+    </details>`;
+  }
+
+  function renderGoogle(entry) {
+    if (!entry || !entry.card) return;
+    const alvo = entry.card.querySelector('.v4-dadoswrap');
+    if (!alvo) return;
+    let g = entry.card.querySelector('.v4-googlewrap');
+    if (!g) { alvo.insertAdjacentHTML('afterend', '<div class="v4-googlewrap"></div>'); g = entry.card.querySelector('.v4-googlewrap'); }
+    const aberto = g.querySelector('details') && g.querySelector('details').open;
+    g.innerHTML = googleHTML(entry);
+    if (aberto) g.querySelector('details').open = true;
+  }
+
   function renderDados(entry) {
     const w = entry.card.querySelector('.v4-dadoswrap');
     if (!w) return;
@@ -1823,6 +1935,10 @@ Cadastro é ponto de partida; investigação é a verdade.`;
       }
     }
 
+    if (entry.cnpjViaSocio) {   // v25.16
+      L.push(['CNPJ', `achado pelas empresas do sócio ${esc(entry.cnpjViaSocio.socio)} · bate com o prefixo do cadastro`
+        + `<br><span style="color:#8A8A8A">outra empresa dele: ${esc(fmtCnpj(entry.cnpjViaSocio.outra))}</span>`]);
+    }
     if (entry.cnpjErrado) {
       L.push(['⚠ CNPJ', esc(entry.cnpjErrado.texto)
         + '<br><span style="color:#8A8A8A">os dados da Receita foram descartados — '
@@ -1843,8 +1959,9 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     }
 
     if (entry.iniciais) {
+      // v25.17: o botão já buscou no nome dele — o SDR não precisa procurar
       L.push(['⚠ Nome', esc(entry.iniciais.texto)
-        + ' <span style="color:#8A8A8A">— procure empresas no CPF/nome dele</span>']);
+        + (entry.oficial ? '' : ' <span style="color:#8A8A8A">— o botão buscou empresas no nome dele e não achou; pedir o CNPJ na ligação</span>')]);
     }
     if (ex.regiao) L.push(['DDD', `${ex.ddd} · ${esc(ex.regiao.texto)}`]);
     if (entry.emailPorte && entry.emailPorte.nivel === 'alto') {
@@ -1853,6 +1970,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
     w.innerHTML = L.length ? `<div class="v4-dados"><div class="v4-dados-lbl">Dados encontrados</div>
       <table>${L.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('')}</table></div>` : '';
+    try { renderGoogle(entry); } catch (e) {}   // v25.18
   }
 
   // v14.0: empresas no nome do contato. Dono de CNPJ é decisor por definição —
@@ -3251,6 +3369,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
         timeout,
         onload(r) {
           try {
+            registrarSerper(r.status, r.status >= 400 ? r.responseText : '');   // v25.18
             if (r.status >= 400) return resolve({ erro: `HTTP ${r.status}`, ms: Date.now() - t0 });
             const d = JSON.parse(r.responseText);
             const itens = [...(d.organic || []), ...(d.knowledgeGraph ? [d.knowledgeGraph] : [])];
@@ -3272,8 +3391,8 @@ Cadastro é ponto de partida; investigação é a verdade.`;
             });
           } catch (e) { resolve({ erro: e.message, ms: Date.now() - t0 }); }
         },
-        onerror() { resolve({ erro: 'rede' }); },
-        ontimeout() { resolve({ erro: 'timeout' }); },
+        onerror() { registrarSerper(0, 'rede'); resolve({ erro: 'rede' }); },
+        ontimeout() { registrarSerper(0, 'timeout'); resolve({ erro: 'timeout' }); },
       });
     });
   }
@@ -3338,6 +3457,20 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     const queries = [];
     // com prefixo do CNPJ é sempre seguro — ele é a prova de identidade
     if (px.length >= 4 && nucleo) queries.push(`"${nucleo}" ${px} CNPJ`);
+    // v25.16: caso RP SISTEMAS — os sites mostram "30.126.xxx/0001-xx" com pontos;
+    // a busca por "30126" não casa. Busca também no formato com pontos.
+    const pxFmt = px.length >= 5 ? `${px.slice(0, 2)}.${px.slice(2, 5)}${px.length >= 8 ? '.' + px.slice(5, 8) : ''}` : '';
+    if (pxFmt) queries.push(`"${pxFmt}" ${nucleo || ''} CNPJ`.replace(/\s+/g, ' ').trim());
+    // v25.16: e-mail com domínio da empresa → o CNPJ costuma estar no rodapé do site
+    const dom = String(ex.email || '').split('@')[1] || '';
+    if (dom && !/gmail|hotmail|outlook|yahoo|icloud|live|bol|uol|terra|msn/i.test(dom)) queries.push(`"${dom}" CNPJ`);
+    // v25.17: caso CZ AUTO PEÇAS — "CZ" = Claudinei Zanghelini. Quando o nome da
+    // empresa vem do contato, o registro costuma estar no NOME DELE (empresário
+    // individual). O card mandava o SDR "procurar no nome dele"; agora o botão busca.
+    const contatoInteiro = String(ex.nomeContato || '').replace(/\s+[l|\-–]\s+.*$/i, '').trim();
+    let vemDoContato = null;
+    try { vemDoContato = checarIniciais(ex.nomeEmpresa, ex.nomeContato) || nomeVemDoContato(ex.nomeEmpresa, ex.nomeContato) || iniciaisNoNome(ex.nomeEmpresa, ex.nomeContato); } catch (e) {}
+    if (vemDoContato && contatoInteiro.split(/\s+/).length >= 2) queries.push(`"${contatoInteiro}" CNPJ`);
     // v25.1: negócio pequeno costuma estar no NOME DO DONO (casos HABIBI BEIRUT,
     // CANTINA BEM ESTAR): o nome fantasia não acha o registro; o dono, sim.
     const contatoCompleto = String(ex.nomeContato || '').replace(/\s+[l|\-–]\s+.*$/i, '').trim();
@@ -3351,7 +3484,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
 
     // v24.1: em paralelo e no máximo 2. Em série eram até 3 × 3s — 9,4s no
     // CLORO MATO GROSSO. A ordem continua sendo a de prioridade.
-    const usar = queries.slice(0, 2);
+    const usar = queries.slice(0, 3);   // v25.16: 3 em paralelo — mesmo tempo
     const rs = await Promise.all(usar.map(q => buscarWeb(q, 4000, true).catch(() => null)));
     // v25.12: junta as empresas citadas em todas as buscas, sem repetir
     const todos = [];
@@ -3949,7 +4082,7 @@ Cadastro é ponto de partida; investigação é a verdade.`;
     // Da busca, entra só quem tem TODAS as palavras do nome do lead.
     const raiz = (w) => w.replace(/ens$/, 'em').replace(/s$/, '');
     const toks = (t) => normalizarTexto(String(t || '')).replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
-      .filter(w => w.length > 2 && !/^(ltda|eireli|epp|dos|das|com|para|the)$/.test(w)).map(raiz);
+      .filter(w => w.length > 1 && !/^(de|da|do|e|em|me|ltda|eireli|epp|dos|das|com|para|the)$/.test(w)).map(raiz);
     const doLead = toks(ex.nomeEmpresa);
     for (const a of (ex._candidatos || [])) {
       const nome = String(a.titulo || '').replace(/\s*[-|–].*$/, '').trim() || 'empresa citada na busca';
@@ -8046,7 +8179,17 @@ ${nucleoDoNome(ex.nomeEmpresa) ? `1. ${nucleoDoNome(ex.nomeEmpresa)} ${ex.cidade
       const { texto, uso } = normalizarResposta(bruto);
       registrarUso('gpt', uso, tag);
       const j = limparPalpites(extractJson(texto)); j._src = 'gpt'; j._uso = uso;
-      if (bruto && bruto.semBusca) j._semBusca = true;   // v25.2
+      if (bruto && bruto.semBusca) {
+        j._semBusca = true;   // v25.2
+        // v25.18: sem busca, a IA responde de memória — e inventa (SYSTECH:
+        // "40.000.000/0001-00"). Sem busca, nenhum dado factual é aceito.
+        for (const k of ['cnpj_descoberto', 'decisor_papel', 'decisor_evidencia', 'decisor_url', 'decisor_status', 'decisor_fonte',
+          'site', 'instagram', 'linkedin_empresa', 'linkedin_contato', 'outras_empresas', 'homonimos_encontrados',
+          'empresa_do_contato', 'funcionarios_linkedin', 'vagas_abertas']) {
+          if (k in j) j[k] = Array.isArray(j[k]) ? [] : null;
+        }
+        if (j.empresa_existe === 'sim' || j.empresa_existe === 'nao') j.empresa_existe = 'parcial';
+      }
       return j;
     };
     // v25.2: no modo rápido os resultados do Serper já estão no prompt — a OpenAI
@@ -8713,6 +8856,11 @@ ${semInternos(m1)}`;
     // 🌐 presença online
     sec('🌐 PRESENÇA ONLINE');
     lin('Site', doisM('site'));
+    // v25.18: o que o Google Maps tem da empresa
+    if (entry.maps && entry.maps[0]) {
+      const mp = entry.maps[0];
+      lin('Google Maps', [mp.telefone ? '📞 ' + mp.telefone : '', mp.endereco, mp.nota ? `⭐ ${mp.nota}${mp.avaliacoes ? ' (' + mp.avaliacoes + ')' : ''}` : ''].filter(Boolean).join(' · '));
+    }
     lin('Instagram', doisM('instagram'));
     lin('LinkedIn', doisM('linkedin_empresa') || doisM('linkedin_contato'));
     if (doisM('funcionarios_linkedin')) lin('Funcionários', doisM('funcionarios_linkedin'));
@@ -9307,6 +9455,8 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       const buscasM1 = modoRapidoLigado()
         ? buscasEmParalelo(planoDeBuscas(entry.extracted, 'M1')).catch(() => null) : null;
 
+      // v25.18: Google Maps (telefone, endereço, nota) em paralelo
+      buscarMaps(entry.extracted).then(l => { entry.maps = l; try { renderGoogle(entry); } catch (e) {} }).catch(() => {});
       const buscaCrua = acharCnpjPorBusca(entry.extracted)
         .then(r => {
           if (r && r.cnpj) {
@@ -9379,6 +9529,9 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
             entry.cnpjErrado = conf;
             console.warn('[V4] CNPJ descartado:', conf.texto);
             try { renderBoxes(entry); } catch (e) {}
+            // v25.16: o contato é sócio da empresa achada? Procura as OUTRAS empresas
+            // desse sócio com o prefixo do cadastro (caso RP SISTEMAS)
+            segundaChancePeloSocio(entry, r.empresa).catch(() => {});
             return;                                   // não adota a empresa errada
           }
           // v25.1: sem prefixo confirmado, só adota com vínculo ao lead
@@ -9969,6 +10122,40 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
 
   // v25.1: caso DOJO — o contato é sócio de OUTRA empresa com o nome do lead
   // (achada pela investigação). Essa é a empresa do lead: troca.
+  // v25.16: caso RP SISTEMAS — a busca achou a R P SISTEMAS (22.003.472), de
+  // "Rafael Luiz Gomes Mattoso Mendonça"; o cadastro do lead começa com 30.126.
+  // O contato "Rafael" é o mesmo sócio, com outra empresa. Busca as empresas
+  // desse sócio e adota a que tem o prefixo do cadastro.
+  async function segundaChancePeloSocio(entry, empErrada) {
+    const ex = entry.extracted || {};
+    const px = String(ex.cnpjParcial || '').replace(/\D/g, '');
+    if (px.length < 4 || !empErrada) return false;
+    const p0 = partesNome(ex.nomeContato || '')[0];
+    if (!p0) return false;
+    const socio = (empErrada.qsa || []).find(sx => partesNome(sx.nome || '')[0] === p0);
+    if (!socio) return false;
+    const pxFmt = px.length >= 5 ? `${px.slice(0, 2)}.${px.slice(2, 5)}` : px;
+    const qs = [`"${socio.nome}" CNPJ`, `"${socio.nome}" ${pxFmt}`];
+    const rs = await Promise.all(qs.map(q => buscarWeb(q, 4000, true).catch(() => null)));
+    for (const r of rs) {
+      if (!r || r.erro) continue;
+      const a = garimparCnpj(r, px, '');
+      if (!a || !a.casaPrefixo) continue;
+      const of = await buscarOficial(a.cnpj, ex);
+      if (!of || !of.empresa) continue;
+      const conf = confrontarCnpj(of.empresa.cnpj, ex.cnpjParcial);
+      if (!conf || !conf.bate) continue;
+      entry.cnpjConfirmado = conf; entry.oficial = of.empresa; entry.oficialFontes = of.fontes;
+      entry.qsaMatch = of.qsaMatch; entry.cnpjResolvido = of.empresa.cnpj; entry.cnpjErrado = null;
+      entry.cnpjViaSocio = { socio: socio.nome, outra: empErrada.cnpj };
+      console.log('[V4] empresa achada pelo sócio:', fmtCnpj(of.empresa.cnpj), of.empresa.razao_social);
+      if (entry.card) applyOficial(entry);
+      try { saveEntry(entry); renderBoxes(entry); } catch (e) {}
+      return true;
+    }
+    return false;
+  }
+
   async function adotarEmpresaDoContato(entry) {
     const ex = entry.extracted || {};
     if (partesNome(ex.nomeContato || '').filter(p => p.length > 1).length < 2) return false;
@@ -10732,8 +10919,11 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
         chip('Gemini', v4Health.gemini, 'gemini') +
         chip('OutboundPro', v4Health.outbound, 'outbound') +
         // v21.0: a busca crua é o caminho mais rápido pro CNPJ
+        // v25.18: o "ON" só dizia que havia chave; agora mostra o retorno da última busca
         (GM_getValue('v4_serper_key', '')
-          ? `<span class="v4-chip" style="border-color:#16A34A50;color:#4ADE80" title="Busca web crua: acha o CNPJ em ~1s, antes da IA">⚡ Serper ON</span>`
+          ? (() => { const es = estadoSerper();
+              const cor = es.estado === 'ok' ? 'border-color:#16A34A50;color:#4ADE80' : (es.estado === 'novo' ? 'opacity:.7' : 'border-color:#DC262680;color:#F87171');
+              return `<span class="v4-chip" style="${cor}" title="Retorno da última busca no Serper">${es.estado === 'ok' || es.estado === 'novo' ? '⚡' : '🔴'} ${esc(es.txt)}</span>`; })()
           : `<span class="v4-chip" style="opacity:.45" title="Sem a busca crua o CNPJ depende da IA achar — mais lento e menos confiável. Configure em ⚙ Mais opções → 🔑 Chaves → 3">⚡ sem Serper</span>`) +
         // v22.0: envio automático pro GHL
         (GM_getValue('v4_ghl_token', '') && GM_getValue('v4_ghl_location', '')
@@ -11718,6 +11908,10 @@ Declarado: ${entry.porteMaior.declarado || entry.porteMaior.faixaAtual}
       L.push(`  ${st(v4Health.openai.state)} OpenAI    ${v4Health.openai.erro || ''}`);
       L.push(`  ${st(v4Health.gemini.state)} Gemini    ${v4Health.gemini.erro || ''}`);
       L.push(`  ${st(v4Health.brasil.state)} BrasilAPI`);
+      { const es = estadoSerper();   // v25.18
+        L.push(`  ${es.estado === 'ok' ? '✅' : (es.estado === 'novo' ? '⚪' : '❌')} Serper    ${es.txt}${es.t ? ' · última busca ' + new Date(es.t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}`); }
+      { const pausa = Number(GM_getValue('v4_gemini_pausa_ate', 0) || 0), fal = Number(GM_getValue('v4_gemini_falhas', 0) || 0);
+        if (fal || pausa > Date.now()) L.push(`     Gemini: ${fal} falha(s) seguida(s)${pausa > Date.now() ? ' · pausado até ' + new Date(pausa).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}`); }
     } else {
       L.push('', '⚠️ Integrações ainda não testadas — clique no ↻ do painel');
     }
